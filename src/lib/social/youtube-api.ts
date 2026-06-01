@@ -201,6 +201,22 @@ export function pacificMidnightUtc(): Date {
 }
 
 /** Refresh OAuth token if needed. Reads client credentials from DB per channel. */
+async function hasHealthyAlternateYouTubeCredential(
+  currentChannelId: number,
+  platformChannelId: string | null,
+): Promise<boolean> {
+  if (!platformChannelId) return false;
+  const rows = await db.query.socialChannels.findMany({
+    where: (t, { and: a, eq: e, ne: neq }) => a(
+      e(t.platform, "youtube"),
+      e(t.platformChannelId, platformChannelId),
+      neq(t.id, currentChannelId),
+      e(t.isActive, true),
+    ),
+  });
+  return rows.some((row) => !!row.accessToken && !row.needsReconnect);
+}
+
 export async function getFreshOAuth2Client(channelId: number) {
   const ch = await db.query.socialChannels.findFirst({
     where: eq(socialChannels.id, channelId),
@@ -239,7 +255,13 @@ export async function getFreshOAuth2Client(channelId: number) {
           lastError: errorMsg.slice(0, 500),
           updatedAt: new Date(),
         }).where(eq(socialChannels.id, channelId));
-        await notifyChannelDisconnected(ch.name, errorMsg);
+        const hasAlt = await hasHealthyAlternateYouTubeCredential(
+          channelId,
+          ch.platformChannelId ?? null,
+        );
+        if (!hasAlt) {
+          await notifyChannelDisconnected(ch.name, errorMsg);
+        }
       }
       throw err;
     }
@@ -329,7 +351,13 @@ export async function uploadToYouTube(
         updatedAt: new Date(),
       }).where(eq(socialChannels.id, channelId));
       const ch = await db.query.socialChannels.findFirst({ where: eq(socialChannels.id, channelId) });
-      if (ch) await notifyChannelDisconnected(ch.name, fullMsg);
+      if (ch) {
+        const hasAlt = await hasHealthyAlternateYouTubeCredential(
+          channelId,
+          ch.platformChannelId ?? null,
+        );
+        if (!hasAlt) await notifyChannelDisconnected(ch.name, fullMsg);
+      }
     }
     return { success: false, error: fullMsg.slice(0, 500) };
   }

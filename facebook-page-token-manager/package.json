@@ -1,0 +1,26 @@
+{
+  "name": "facebook-page-token-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone Express service for managing Facebook long-lived user tokens and page access tokens.",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "axios": "^1.11.0",
+    "dotenv": "^17.4.2",
+    "express": "^4.21.2",
+    "helmet": "^8.1.0",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.2.1",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2"
+  }
+}

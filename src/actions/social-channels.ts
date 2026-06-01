@@ -379,29 +379,44 @@ function findNextBulkSlot(
   taken: number[],
   notBefore?: Date,
 ): Date | null {
+  const VN_OFFSET_MS = 7 * 60 * 60 * 1000;
   const [sh, sm] = windowStart.split(":").map(Number);
   const [eh, em] = windowEnd.split(":").map(Number);
   const windowEndMin = eh * 60 + em;
   const now = notBefore && notBefore.getTime() > Date.now()
     ? new Date(notBefore.getTime() - 1000)
     : new Date();
+  const nowVn = new Date(now.getTime() + VN_OFFSET_MS);
 
   for (let day = 0; day < 14; day++) {
-    const base = new Date(now);
-    base.setDate(base.getDate() + day);
-    base.setSeconds(0, 0);
+    const baseVn = new Date(Date.UTC(
+      nowVn.getUTCFullYear(),
+      nowVn.getUTCMonth(),
+      nowVn.getUTCDate() + day,
+      0,
+      0,
+      0,
+      0,
+    ));
 
     let startMin = sh * 60 + sm;
     if (day === 0) {
-      const nowMin = now.getHours() * 60 + now.getMinutes();
+      const nowMin = nowVn.getUTCHours() * 60 + nowVn.getUTCMinutes();
       if (nowMin >= startMin) {
         startMin = Math.ceil((nowMin + 1) / intervalMin) * intervalMin;
       }
     }
 
     for (let slotMin = startMin; slotMin <= windowEndMin; slotMin += intervalMin) {
-      const candidate = new Date(base);
-      candidate.setHours(Math.floor(slotMin / 60), slotMin % 60, 0, 0);
+      const candidate = new Date(Date.UTC(
+        baseVn.getUTCFullYear(),
+        baseVn.getUTCMonth(),
+        baseVn.getUTCDate(),
+        Math.floor(slotMin / 60) - 7,
+        slotMin % 60,
+        0,
+        0,
+      ));
       if (candidate.getTime() <= now.getTime()) continue;
       const half = (intervalMin / 2) * 60_000;
       const conflict = taken.some(t => Math.abs(t - candidate.getTime()) < half);
@@ -1237,7 +1252,23 @@ export async function processUploadQueueAction(platformFilter?: string): Promise
         break;
 
       } else if (isTokenRevokedError(res.error)) {
-        // Token revoked → permanent error, channel already marked needsReconnect
+        // Token revoked on one OAuth client → rotate to another credential for
+        // the same real YouTube channel when possible.
+        const altChannelId = await findAvailableYouTubeChannel(
+          item.channelId,
+          item.channel.platformChannelId ?? "",
+        );
+        if (altChannelId) {
+          await db.update(uploadQueue).set({
+            channelId: altChannelId,
+            status: "queued",
+            errorMessage: "Chuyển kênh dự phòng (auth kênh cũ lỗi)",
+            updatedAt: new Date(),
+          }).where(eq(uploadQueue.id, item.id));
+          results.push({ id: item.id, ok: false, error: "auth_rotated" });
+          continue;
+        }
+
         await db.update(uploadQueue).set({
           status: "error",
           errorMessage: res.error,
@@ -1246,7 +1277,22 @@ export async function processUploadQueueAction(platformFilter?: string): Promise
         results.push({ id: item.id, ok: false, error: res.error });
 
       } else if (isAuthError(res.error)) {
-        // Transient auth (token just expired) → keep queued, retry next cron
+        const altChannelId = await findAvailableYouTubeChannel(
+          item.channelId,
+          item.channel.platformChannelId ?? "",
+        );
+        if (altChannelId) {
+          await db.update(uploadQueue).set({
+            channelId: altChannelId,
+            status: "queued",
+            errorMessage: "Chuyển kênh dự phòng (auth retry)",
+            updatedAt: new Date(),
+          }).where(eq(uploadQueue.id, item.id));
+          results.push({ id: item.id, ok: false, error: "auth_rotated" });
+          continue;
+        }
+
+        // No alternative → keep queued and retry next cron.
         await db.update(uploadQueue).set({
           status: "queued",
           errorMessage: res.error,

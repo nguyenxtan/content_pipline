@@ -75,35 +75,44 @@ export function buildSubtitleChunksFromWords(words: WordTimestamp[], actualText?
   if (words.length === 0) return [];
 
   // Build timing windows from Whisper (groups of MAX_WORDS_PER_CHUNK)
-  const timingWindows: { start: number; end: number }[] = [];
+  const timingWindows: { start: number; end: number; wordCount: number }[] = [];
   for (let i = 0; i < words.length; i += MAX_WORDS_PER_CHUNK) {
     const group = words.slice(i, i + MAX_WORDS_PER_CHUNK);
-    timingWindows.push({ start: group[0].start, end: group[group.length - 1].end });
+    timingWindows.push({ start: group[0].start, end: group[group.length - 1].end, wordCount: group.length });
   }
 
   if (!actualText) {
     // Fallback: use Whisper text (may have wrong diacritics)
     return timingWindows.map((tw, i) => ({
-      ...tw,
+      start: tw.start,
+      end: tw.end,
       text: words.slice(i * MAX_WORDS_PER_CHUNK, (i + 1) * MAX_WORDS_PER_CHUNK).map(w => w.word).join(" "),
     }));
   }
 
-  // Distribute actual words proportionally across timing windows
+  // Keep chunk boundaries close to Whisper grouping so subtitle timing stays attached
+  // to the spoken words even when Whisper misses some diacritics.
   const actualWords = actualText.trim().split(/\s+/).filter(w => w.length > 0);
-  const numChunks = timingWindows.length;
+  const result: SubtitleChunk[] = [];
+  let cursor = 0;
 
-  return timingWindows.map((tw, i) => {
-    const startIdx = Math.round((i / numChunks) * actualWords.length);
-    const endIdx   = i === numChunks - 1
-      ? actualWords.length
-      : Math.round(((i + 1) / numChunks) * actualWords.length);
-    return {
+  for (let i = 0; i < timingWindows.length; i += 1) {
+    const tw = timingWindows[i];
+    const remainingChunks = timingWindows.length - i;
+    const remainingWords = actualWords.length - cursor;
+    const take = i === timingWindows.length - 1
+      ? remainingWords
+      : Math.max(1, Math.min(tw.wordCount, remainingWords - (remainingChunks - 1)));
+    const slice = actualWords.slice(cursor, cursor + take);
+    result.push({
       start: tw.start,
-      end:   tw.end,
-      text:  actualWords.slice(startIdx, endIdx).join(" ") || "…",
-    };
-  });
+      end: tw.end,
+      text: slice.join(" ") || "…",
+    });
+    cursor += take;
+  }
+
+  return result;
 }
 
 export function buildSubtitleChunks(

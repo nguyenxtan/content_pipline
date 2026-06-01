@@ -13,6 +13,7 @@ import {
 import { sendTelegram } from "@/lib/social/telegram";
 
 const CRON_HEALTH_CONFIG_KEY = "cron_health_state";
+const CRON_ADVISORY_LOCK_KEY = 72400131;
 
 type CronHealthState = {
   lastRecoveryAlertForLogAt?: string | null;
@@ -57,6 +58,16 @@ async function setCronHealthState(state: CronHealthState): Promise<void> {
     });
 }
 
+async function tryAcquireCronLock(): Promise<boolean> {
+  const result = await db.execute(sql`select pg_try_advisory_lock(${CRON_ADVISORY_LOCK_KEY}) as locked`);
+  const row = Array.isArray(result) ? result[0] : (result as { rows?: Array<{ locked?: boolean }> }).rows?.[0];
+  return !!row?.locked;
+}
+
+async function releaseCronLock(): Promise<void> {
+  await db.execute(sql`select pg_advisory_unlock(${CRON_ADVISORY_LOCK_KEY})`);
+}
+
 export async function POST(req: NextRequest) {
   const secret = process.env.CRON_SECRET;
   if (secret) {
@@ -76,6 +87,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: result.error }, { status: 400 });
     }
     return NextResponse.json({ ok: true, ...result });
+  }
+
+  const lockAcquired = await tryAcquireCronLock();
+  if (!lockAcquired) {
+    return NextResponse.json({
+      ok: true,
+      skipped: "cron_locked",
+      ran: 0,
+      results: [],
+      uploads: { processed: 0, results: [] },
+      errors: [],
+      durationMs: 0,
+    });
   }
 
   // ── Detect cron gap (cron was dead) ─────────────────────────
@@ -130,6 +154,17 @@ export async function POST(req: NextRequest) {
   let uploadResult: Awaited<ReturnType<typeof processUploadQueueAction>> = { processed: 0, results: [] };
 
   try {
+    try {
+      uploadResult = await processUploadQueueAction();
+      const uploadErrors = uploadResult.results
+        .filter((r) => !r.ok && !NON_FATAL_UPLOAD_ERRORS.has(r.error ?? ""))
+        .map((r) => `[upload] ${r.error ?? "unknown error"}`);
+      errors.push(...uploadErrors);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`[upload] ${message}`);
+    }
+
     dueJobs = await db
       .select()
       .from(contentSchedulerJobs)
@@ -150,17 +185,6 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    try {
-      uploadResult = await processUploadQueueAction();
-      const uploadErrors = uploadResult.results
-        .filter((r) => !r.ok && !NON_FATAL_UPLOAD_ERRORS.has(r.error ?? ""))
-        .map((r) => `[upload] ${r.error ?? "unknown error"}`);
-      errors.push(...uploadErrors);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      errors.push(`[upload] ${message}`);
-    }
-
     // ── Backfill legacy uploads (idempotent, no-op after first run) ───
     await backfillLegacyUploadsAction().catch(() => {});
     await backfillPublishedVideosAction().catch(() => {});
@@ -175,6 +199,8 @@ export async function POST(req: NextRequest) {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     errors.push(`[cron] ${message}`);
+  } finally {
+    await releaseCronLock().catch(() => {});
   }
 
   // ── Telegram alert on failures ───────────────────────────────

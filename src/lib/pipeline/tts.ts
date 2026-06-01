@@ -31,6 +31,17 @@ function sanitizeVoiceName(voice: string): string {
   return voice.replace(/[^a-z0-9_-]/gi, "_").toLowerCase();
 }
 
+function normalizeTextForTTS(text: string): string {
+  return text
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{2,}/g, ". ")
+    .replace(/\n+/g, " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .replace(/([,.;:!?]){2,}/g, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 function resolveLocalPath(filePath: string): string {
   if (path.isAbsolute(filePath) && fs.existsSync(filePath)) {
     return filePath;
@@ -44,7 +55,12 @@ async function normalizeAudioWithLoudnorm(inputPath: string, outputPath: string)
   await execFileAsync(FFMPEG_PATH, [
     "-y",
     "-i", inputPath,
-    "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+    "-af",
+    [
+      "silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.05",
+      "stop_periods=-1:stop_threshold=-50dB:stop_duration=0.35:stop_silence=0.16:detection=rms",
+      "loudnorm=I=-16:TP=-1.5:LRA=11",
+    ].join(","),
     "-ar", "48000",
     "-ac", "1",
     "-c:a", "pcm_s16le",
@@ -69,10 +85,11 @@ export async function runTTS(
 
   const isLong = contentType === "long";
   const text   = isLong ? item.longContent : item.shortContent;
+  const ttsText = normalizeTextForTTS(text);
   const fileId = isLong ? `${contentId}-long` : contentId;
   const targetRelPath = `media/audio/${fileId}.wav`;
   const targetAbsPath = path.join(AUDIO_DIR, `${fileId}.wav`);
-  const cacheHash = buildTextHash(text);
+  const cacheHash = buildTextHash(ttsText);
   const cacheAbsPath = path.join(AUDIO_CACHE_DIR, cacheHash, `${sanitizeVoiceName(ttsVoice)}.wav`);
 
   await db.update(contentGenerations)
@@ -103,7 +120,7 @@ export async function runTTS(
     const submitRes = await fetch(`${TTS_API_URL}/tts/async`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, content_id: fileId, voice: ttsVoice }),
+      body: JSON.stringify({ text: ttsText, content_id: fileId, voice: ttsVoice }),
       signal: AbortSignal.timeout(30_000),
     });
 

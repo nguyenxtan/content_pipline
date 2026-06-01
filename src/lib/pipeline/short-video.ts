@@ -113,22 +113,6 @@ function toAssTime(seconds: number): string {
   return `${h}:${String(m).padStart(2, "0")}:${String(ss).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
 }
 
-function delaySubtitleChunks(chunks: { start: number; end: number; text: string }[], delaySec: number, totalDuration: number) {
-  if (delaySec <= 0) return chunks;
-
-  return chunks
-    .map((chunk) => {
-      const shiftedStart = Math.min(chunk.start + delaySec, totalDuration);
-      const shiftedEnd = Math.min(chunk.end + delaySec, totalDuration);
-      return {
-        ...chunk,
-        start: shiftedStart,
-        end: Math.max(shiftedStart + 0.12, shiftedEnd),
-      };
-    })
-    .filter((chunk) => chunk.start < totalDuration);
-}
-
 function chooseCoverTitle(topic: string | null | undefined, shortContent: string | null | undefined): string {
   const topicText = topic?.trim().replace(/\s+/g, " ") ?? "";
   if (topicText) {
@@ -255,8 +239,7 @@ export async function runShortVideo(contentId: string, bgMusicOverride?: boolean
     const n = absImages.length;
     const imageDurations = buildImageDurations(audioDuration, n);
     const coverDuration = Math.min(imageDurations[0], SHORT_COVER_OVERLAY_SEC);
-    const subtitleChunks = delaySubtitleChunks(chunks, coverDuration, audioDuration);
-    fs.writeFileSync(assPath, buildAssFile(subtitleChunks, VIDEO_WIDTH, VIDEO_HEIGHT, contentId, SHORT_SUBTITLE_MARGIN_V), "utf-8");
+    fs.writeFileSync(assPath, buildAssFile(chunks, VIDEO_WIDTH, VIDEO_HEIGHT, contentId, SHORT_SUBTITLE_MARGIN_V), "utf-8");
     fs.writeFileSync(coverAssPath, buildCoverAssFile(chooseCoverTitle(topic, shortContent), coverDuration), "utf-8");
     const args: string[] = ["-y"];
     for (const [index, img] of absImages.entries()) {

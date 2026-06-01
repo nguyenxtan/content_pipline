@@ -1,0 +1,29 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: facebook_page_token_manager_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: facebook_page_token_manager
+    ports:
+      - "5444:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: facebook_page_token_manager_app
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    ports:
+      - "4001:4001"
+    env_file:
+      - .env
+
+volumes:
+  pgdata:

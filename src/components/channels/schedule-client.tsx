@@ -4,6 +4,7 @@ import React, { useState, useCallback, useEffect } from "react";
 import {
   RefreshCw, X, RotateCcw, Clock, XCircle, Loader2, Ban,
   Video, Film, Zap, CalendarPlus, ChevronDown, CheckCircle2, Image as ImageIcon,
+  Layers3, AlertTriangle, RadioTower,
 } from "lucide-react";
 import type { UploadQueueRow, ReadyVideoRow, AutoScheduleSettings, AutoScheduleVideoSetting } from "@/actions/social-channels";
 import type { SocialChannel } from "@/lib/db/schema";
@@ -63,6 +64,13 @@ function fmtInterval(intervalMin: number): string {
   return `${minutes} phút`;
 }
 
+function cardTone(status: string): string {
+  if (status === "uploading") return "border-blue-800/40 bg-blue-950/20";
+  if (status === "error") return "border-red-800/40 bg-red-950/20";
+  if (status === "queued") return "border-amber-800/30 bg-amber-950/10";
+  return "border-slate-800 bg-slate-900/40";
+}
+
 // ── Queue item row ───────────────────────────────────────────────────────────
 
 function QueueItem({ item, onUpdate }: { item: UploadQueueRow; onUpdate: () => void }) {
@@ -73,26 +81,35 @@ function QueueItem({ item, onUpdate }: { item: UploadQueueRow; onUpdate: () => v
   const act = async (fn: () => Promise<unknown>) => { setBusy(true); await fn(); setBusy(false); onUpdate(); };
 
   return (
-    <div className="flex items-center gap-2 py-1.5 px-2 rounded-lg hover:bg-slate-800/50 group">
-      <div className="flex-1 min-w-0">
-        <p className="text-xs text-slate-200 truncate" title={item.title}>{item.title}</p>
-        <div className="flex items-center gap-2 mt-0.5">
-          <span className={`flex items-center gap-0.5 text-[10px] ${cfg.color}`}>
-            <Icon className={`h-2.5 w-2.5 ${item.status === "uploading" ? "animate-spin" : ""}`} />
-            {cfg.label}
-          </span>
-            <span className="text-[10px] text-slate-600">
-              <Clock className="inline h-2.5 w-2.5 mr-0.5 -mt-0.5" />
+    <div className={`group rounded-xl border px-3 py-2.5 transition-colors hover:border-slate-700 ${cardTone(item.status)}`}>
+      <div className="flex items-start gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`inline-flex items-center gap-1 rounded-full border border-slate-800 bg-slate-900/80 px-2 py-0.5 text-[10px] font-medium ${cfg.color}`}>
+              <Icon className={`h-2.5 w-2.5 ${item.status === "uploading" ? "animate-spin" : ""}`} />
+              {cfg.label}
+            </span>
+            <span className="text-[10px] uppercase tracking-wide text-slate-500">
+              {item.videoType === "quote" ? "Bài ảnh" : item.videoType === "short" ? "Short / Reel" : "Long"}
+            </span>
+          </div>
+          <p className="mt-1 text-sm font-medium leading-snug text-slate-100" title={item.title}>{item.title}</p>
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-400">
+            <span className="inline-flex items-center gap-1">
+              <Clock className="h-3 w-3 text-slate-500" />
               {fmtTime(item.scheduledAt)}
             </span>
-          {item.status === "error" && item.errorMessage && (
-            <span className="text-[10px] text-red-400 truncate max-w-[150px]" title={item.errorMessage}>
-              {item.errorMessage.slice(0, 60)}
+            <span className="text-slate-500">
+              {item.platform === "facebook" ? "Facebook" : "YouTube"} · {item.platformAccountName ?? item.channelName}
             </span>
+          </div>
+          {item.status === "error" && item.errorMessage && (
+            <p className="mt-2 text-[11px] leading-relaxed text-red-300/90" title={item.errorMessage}>
+              {item.errorMessage}
+            </p>
           )}
         </div>
-      </div>
-      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
         {item.status === "error" && (
           <button onClick={() => act(() => retryUploadAction(item.id))} disabled={busy} title="Thử lại"
             className="p-1 rounded text-slate-500 hover:text-amber-400 hover:bg-amber-900/20 transition-colors disabled:opacity-40">
@@ -105,6 +122,7 @@ function QueueItem({ item, onUpdate }: { item: UploadQueueRow; onUpdate: () => v
             <X className="h-3 w-3" />
           </button>
         )}
+        </div>
       </div>
     </div>
   );
@@ -124,14 +142,14 @@ function TypeSection({ type, items, onUpdate }: {
   const errorCount = items.filter(i => i.status === "error").length;
 
   return (
-    <div className="space-y-0.5">
+    <div className="space-y-1 rounded-xl border border-slate-800/80 bg-slate-950/40 p-2">
       <button onClick={() => setOpen(v => !v)}
-        className="flex items-center gap-1.5 w-full text-left px-2 py-1 rounded hover:bg-slate-800/50 transition-colors">
+        className="flex items-center gap-1.5 w-full text-left px-2 py-1.5 rounded-lg hover:bg-slate-800/50 transition-colors">
         {isShort ? <Video className="h-3 w-3 text-rose-400" /> : isQuote ? <ImageIcon className="h-3 w-3 text-amber-400" /> : <Film className="h-3 w-3 text-cyan-400" />}
         <span className={`text-[11px] font-medium ${isShort ? "text-rose-300" : isQuote ? "text-amber-300" : "text-cyan-300"}`}>
           {isShort ? "Short" : isQuote ? "Bài ảnh" : "Long"}
         </span>
-        <span className="text-[10px] text-slate-600 ml-1">{items.length}</span>
+        <span className="text-[10px] text-slate-500 ml-1">{items.length} item</span>
         {errorCount > 0 && (
           <span className="text-[10px] px-1 rounded bg-red-900/30 border border-red-700/40 text-red-400 ml-1">
             {errorCount} lỗi
@@ -140,7 +158,7 @@ function TypeSection({ type, items, onUpdate }: {
         <ChevronDown className={`h-3 w-3 text-slate-600 ml-auto transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
       {open && (
-        <div className="pl-2 space-y-0.5">
+        <div className="space-y-2 pt-1">
           {items.map(item => <QueueItem key={item.id} item={item} onUpdate={onUpdate} />)}
         </div>
       )}
@@ -160,17 +178,38 @@ function ChannelGroup({ channelLabel, short, quote, long, onUpdate }: {
   const total = short.length + quote.length + long.length;
   const [open, setOpen] = useState(true);
   if (total === 0) return null;
+  const allItems = [...short, ...quote, ...long];
+  const nextItem = allItems.slice().sort((a, b) => a.scheduledAt.getTime() - b.scheduledAt.getTime())[0];
+  const uploadingCount = allItems.filter((item) => item.status === "uploading").length;
+  const errorCount = allItems.filter((item) => item.status === "error").length;
+  const queuedCount = allItems.filter((item) => item.status === "queued").length;
 
   return (
-    <div className="rounded-xl border border-slate-700/60 overflow-hidden">
+    <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/60 shadow-sm">
       <button onClick={() => setOpen(v => !v)}
-        className="flex items-center gap-2 w-full px-3 py-2.5 bg-slate-800/60 hover:bg-slate-800 transition-colors">
-        <span className="text-sm font-medium text-slate-200">{channelLabel}</span>
-        <span className="text-[10px] text-slate-500 ml-1">{total} video</span>
+        className="flex w-full items-start gap-3 bg-slate-900/70 px-4 py-3.5 hover:bg-slate-900 transition-colors">
+        <div className="mt-0.5 rounded-lg border border-slate-800 bg-slate-950/80 p-2">
+          <Layers3 className="h-4 w-4 text-slate-300" />
+        </div>
+        <div className="min-w-0 flex-1 text-left">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-slate-100">{channelLabel}</span>
+            <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] text-slate-400">{total} item</span>
+            {uploadingCount > 0 && <span className="rounded-full border border-blue-700/50 bg-blue-950/30 px-2 py-0.5 text-[10px] text-blue-300">{uploadingCount} đang đăng</span>}
+            {queuedCount > 0 && <span className="rounded-full border border-amber-700/50 bg-amber-950/20 px-2 py-0.5 text-[10px] text-amber-300">{queuedCount} chờ</span>}
+            {errorCount > 0 && <span className="rounded-full border border-red-700/50 bg-red-950/20 px-2 py-0.5 text-[10px] text-red-300">{errorCount} lỗi</span>}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-400">
+            {nextItem && <span>Slot kế tiếp: <span className="text-slate-200">{fmtTime(nextItem.scheduledAt)}</span></span>}
+            {short.length > 0 && <span className="text-rose-300">{short.length} Short</span>}
+            {quote.length > 0 && <span className="text-amber-300">{quote.length} Bài ảnh</span>}
+            {long.length > 0 && <span className="text-cyan-300">{long.length} Long</span>}
+          </div>
+        </div>
         <ChevronDown className={`h-3.5 w-3.5 text-slate-500 ml-auto transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
       {open && (
-        <div className="p-2 space-y-2 bg-slate-900/40">
+        <div className="space-y-3 bg-slate-950/40 p-3">
           <TypeSection type="short" items={short} onUpdate={onUpdate} />
           <TypeSection type="quote" items={quote} onUpdate={onUpdate} />
           <TypeSection type="long"  items={long}  onUpdate={onUpdate} />
@@ -201,10 +240,10 @@ function AutoDestinationRow({
   ];
   const safeInterval = Math.max(minInterval, settings.intervalMin || minInterval);
   return (
-    <div className="space-y-2 rounded-lg border border-slate-700/50 p-3">
+    <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-950/40 p-3">
       <div className="flex items-center gap-2">
         <button onClick={() => onChange({ ...settings, enabled: !settings.enabled })}
-          className={`text-xs px-2 py-0.5 rounded border transition-colors ${settings.enabled ? "border-green-700 bg-green-900/30 text-green-400" : "border-slate-600 bg-slate-800 text-slate-500"}`}>
+          className={`text-xs px-2 py-0.5 rounded-full border transition-colors ${settings.enabled ? "border-green-700 bg-green-900/30 text-green-400" : "border-slate-700 bg-slate-900 text-slate-500"}`}>
           {settings.enabled ? "ON" : "OFF"}
         </button>
         <Icon className={`h-3.5 w-3.5 ${color} shrink-0`} />
@@ -216,7 +255,7 @@ function AutoDestinationRow({
         )}
       </div>
       {settings.enabled && (
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 pl-1">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4 pl-0.5">
           <div>
             <label className="block text-[10px] text-slate-500 mb-1">Kênh</label>
             <select value={settings.channelId} onChange={e => onChange({ ...settings, channelId: +e.target.value })}
@@ -242,7 +281,7 @@ function AutoDestinationRow({
             <div>
               <label className="block text-[10px] text-slate-500 mb-1">Cách (phút)</label>
               <input type="number" min={minInterval} step={60} max={1440} value={safeInterval} onChange={e => onChange({ ...settings, intervalMin: +e.target.value })}
-                className="w-20 border border-slate-600 rounded px-2 py-1.5 text-xs bg-slate-900 text-slate-200 focus:outline-none focus:ring-1 focus:ring-rose-500" />
+                className="w-24 border border-slate-600 rounded px-2 py-1.5 text-xs bg-slate-900 text-slate-200 focus:outline-none focus:ring-1 focus:ring-rose-500" />
             </div>
             <div className="flex-1">
               <label className="block text-[10px] text-slate-500 mb-1">Quyền</label>
@@ -296,15 +335,15 @@ function AutoDestinationSection({
   };
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
       <div className="flex items-center gap-2">
         <Icon className={`h-3.5 w-3.5 ${color} shrink-0`} />
         <span className={`text-xs font-medium ${color}`}>{title}</span>
-        <span className="text-[10px] text-slate-500">{destinations.length} đích</span>
+        <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] text-slate-500">{destinations.length} đích</span>
         {nextAvailableChannel && (
           <button
             onClick={addDestination}
-            className="ml-auto text-[11px] px-2 py-1 rounded border border-slate-600 text-slate-300 hover:bg-slate-800 transition-colors"
+            className="ml-auto rounded-lg border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800 transition-colors"
           >
             + Thêm kênh
           </button>
@@ -380,7 +419,7 @@ function AutoSchedulePanel({
   );
 
   return (
-    <div className="rounded-xl border border-slate-700/80 bg-slate-800/40 overflow-hidden">
+    <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/60 shadow-sm">
       <button onClick={() => setOpen(v => !v)} className="w-full flex items-center justify-between px-4 py-3 hover:bg-slate-800/60 transition-colors">
         <div className="flex items-center gap-2">
           <Zap className="h-4 w-4 text-amber-400" />
@@ -390,10 +429,10 @@ function AutoSchedulePanel({
         <ChevronDown className={`h-4 w-4 text-slate-500 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
       {open && (
-        <div className="px-4 pb-4 space-y-4 border-t border-slate-700/50">
-          <p className="text-[11px] text-slate-500 pt-3">Khi video render xong, hệ thống tự lên lịch vào slot trống tiếp theo.</p>
+        <div className="space-y-4 border-t border-slate-800 px-4 pb-4">
+          <p className="pt-3 text-[11px] text-slate-500">Khi video render xong, hệ thống tự lên lịch vào slot trống tiếp theo. Cùng một kênh thật sẽ luôn được giãn theo khoảng cách bạn cấu hình.</p>
           {settings === null ? <p className="text-xs text-slate-600">Đang tải...</p> : (
-            <div className="space-y-4 divide-y divide-slate-700/50">
+            <div className="space-y-4">
               <AutoDestinationSection
                 title="Video Short"
                 icon={Video}
@@ -403,7 +442,7 @@ function AutoSchedulePanel({
                 minInterval={120}
                 onChange={(rows) => setSettings((prev) => prev ? { ...prev, shortDestinations: rows, short: rows[0] ?? prev.short } : prev)}
               />
-              <div className="pt-4">
+              <div>
                 <AutoDestinationSection
                 title="Facebook bài ảnh"
                 icon={ImageIcon}
@@ -414,7 +453,7 @@ function AutoSchedulePanel({
                 onChange={(rows) => setSettings((prev) => prev ? { ...prev, quoteDestinations: rows } : prev)}
               />
               </div>
-              <div className="pt-4">
+              <div>
                 <AutoDestinationSection
                   title="Video Long"
                   icon={Film}
@@ -593,7 +632,7 @@ function BulkScheduler({ ready, channels, onScheduled }: {
   };
 
   return (
-    <div className="rounded-xl border border-slate-700/80 bg-slate-800/40 p-4 space-y-4">
+    <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 space-y-4 shadow-sm">
       <div className="flex items-center gap-2">
         <Zap className="h-4 w-4 text-amber-400" />
         <p className="text-sm font-semibold text-slate-200">Sẵn sàng đăng</p>
@@ -603,7 +642,7 @@ function BulkScheduler({ ready, channels, onScheduled }: {
           {longCount  > 0 && <span className="text-[10px] px-2 py-0.5 rounded-full border border-cyan-700/50 bg-cyan-900/20 text-cyan-300">{longCount} Long</span>}
         </div>
       </div>
-      <div className="space-y-4 divide-y divide-slate-700/50">
+      <div className="space-y-4 divide-y divide-slate-800">
         <div>{renderRow("short")}</div>
         {quoteCount > 0 && <div className="pt-4">{renderRow("quote")}</div>}
         {longCount > 0 && <div className="pt-4">{renderRow("long")}</div>}
@@ -688,73 +727,108 @@ export function ScheduleClient({ initialItems, initialReady }: Props) {
   const totalUploading = items.filter(i => i.status === "uploading").length;
   const totalError     = items.filter(i => i.status === "error").length;
   const facebookNeedsReconnect = channels.some((c) => c.platform === "facebook" && c.needsReconnect);
+  const nextItem = items
+    .filter((item) => item.status === "queued" || item.status === "uploading")
+    .sort((a, b) => a.scheduledAt.getTime() - b.scheduledAt.getTime())[0];
+  const activeAccounts = new Set(items.map((item) => `${item.platform}:${item.platformAccountId ?? item.channelId}`)).size;
 
   return (
-    <div className="max-w-3xl mx-auto px-4 py-8 space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
+    <div className="mx-auto max-w-7xl px-4 py-8 space-y-6">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+        <div className="space-y-1">
           <h1 className="text-2xl font-bold text-slate-100">Lịch đăng</h1>
-          <p className="text-sm text-slate-400 mt-1">Quản lý hàng chờ đăng video theo kênh và nền tảng.</p>
+          <p className="text-sm text-slate-400">Theo dõi slot đăng theo giờ Việt Nam, quản lý hàng chờ theo nền tảng và giữ nhịp đăng ổn định cho từng kênh.</p>
         </div>
         <button onClick={reload} disabled={loading}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-slate-400 hover:text-slate-200 border border-slate-700 rounded-lg hover:border-slate-500 transition-colors disabled:opacity-40">
+          className="inline-flex items-center gap-2 self-start rounded-xl border border-slate-700 bg-slate-900/70 px-3.5 py-2 text-sm text-slate-300 hover:border-slate-500 hover:text-slate-100 transition-colors disabled:opacity-40">
           <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
-          Refresh
+          Làm mới dữ liệu
         </button>
       </div>
 
-      {/* Auto-schedule */}
-      <AutoSchedulePanel shortChannels={shortScheduleChannels} longChannels={longScheduleChannels} quoteChannels={quoteScheduleChannels} />
-
-      {facebookNeedsReconnect && (
-        <div className="rounded-xl border border-red-800/40 bg-red-950/20 px-4 py-3">
-          <p className="text-sm font-medium text-red-300">Facebook đang tạm dừng đăng</p>
-          <p className="text-xs text-red-400/80 mt-1">
-            Token Page đã hết hạn hoặc thiếu quyền. Cron Facebook đang tự hoãn queue để tránh đăng lỗi lặp lại.
-            Cập nhật token ở <a href="/settings/channels" className="underline underline-offset-2 hover:text-red-300">Settings / Kênh</a>.
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+          <div className="flex items-center gap-2 text-slate-400">
+            <Clock className="h-4 w-4 text-amber-400" />
+            <span className="text-xs uppercase tracking-wide">Hàng chờ</span>
+          </div>
+          <p className="mt-3 text-2xl font-semibold text-slate-100">{totalQueued}</p>
+          <p className="mt-1 text-xs text-slate-500">item đang đợi tới lượt đăng</p>
+        </div>
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+          <div className="flex items-center gap-2 text-slate-400">
+            <RadioTower className="h-4 w-4 text-blue-400" />
+            <span className="text-xs uppercase tracking-wide">Đang xử lý</span>
+          </div>
+          <p className="mt-3 text-2xl font-semibold text-slate-100">{totalUploading}</p>
+          <p className="mt-1 text-xs text-slate-500">item đang upload hoặc publish</p>
+        </div>
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+          <div className="flex items-center gap-2 text-slate-400">
+            <AlertTriangle className="h-4 w-4 text-red-400" />
+            <span className="text-xs uppercase tracking-wide">Cần xử lý</span>
+          </div>
+          <p className="mt-3 text-2xl font-semibold text-slate-100">{totalError}</p>
+          <p className="mt-1 text-xs text-slate-500">item đang lỗi hoặc chờ retry</p>
+        </div>
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+          <div className="flex items-center gap-2 text-slate-400">
+            <Layers3 className="h-4 w-4 text-emerald-400" />
+            <span className="text-xs uppercase tracking-wide">Theo dõi</span>
+          </div>
+          <p className="mt-3 text-2xl font-semibold text-slate-100">{activeAccounts}</p>
+          <p className="mt-1 text-xs text-slate-500">
+            {nextItem ? `Slot gần nhất: ${fmtTime(nextItem.scheduledAt)}` : "Chưa có slot chờ đăng"}
           </p>
         </div>
-      )}
+      </div>
 
-      {/* Bulk scheduler for unscheduled videos */}
-      <BulkScheduler ready={ready} channels={shortScheduleChannels} onScheduled={reload} />
-
-      {/* Stats */}
-      {(totalQueued > 0 || totalUploading > 0 || totalError > 0) && (
-        <div className="flex flex-wrap gap-2">
-          {totalUploading > 0 && (
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-900/30 border border-blue-700/50 text-xs text-blue-300">
-              <Loader2 className="h-3 w-3 animate-spin" />{totalUploading} đang upload
+      <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
+        <div className="space-y-6 xl:sticky xl:top-6 xl:self-start">
+          {facebookNeedsReconnect && (
+            <div className="rounded-2xl border border-red-800/40 bg-red-950/20 px-4 py-3">
+              <p className="text-sm font-medium text-red-300">Facebook đang tạm dừng đăng</p>
+              <p className="mt-1 text-xs leading-relaxed text-red-400/80">
+                Token Page đã hết hạn hoặc thiếu quyền. Cron Facebook đang tự hoãn queue để tránh đăng lỗi lặp lại.
+                Cập nhật token ở <a href="/settings/channels" className="underline underline-offset-2 hover:text-red-300">Settings / Kênh</a>.
+              </p>
             </div>
           )}
-          {totalQueued > 0 && (
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-900/20 border border-amber-700/40 text-xs text-amber-300">
-              <Clock className="h-3 w-3" />{totalQueued} chờ đăng
+
+          <AutoSchedulePanel shortChannels={shortScheduleChannels} longChannels={longScheduleChannels} quoteChannels={quoteScheduleChannels} />
+          <BulkScheduler ready={ready} channels={shortScheduleChannels} onScheduled={reload} />
+        </div>
+
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-sm font-semibold text-slate-100">Hàng chờ theo nền tảng / kênh</h2>
+              {nextItem && (
+                <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[11px] text-slate-400">
+                  Kế tiếp: {fmtTime(nextItem.scheduledAt)}
+                </span>
+              )}
             </div>
-          )}
-          {totalError > 0 && (
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-900/20 border border-red-700/40 text-xs text-red-300">
-              <XCircle className="h-3 w-3" />{totalError} lỗi
+            <p className="mt-1 text-xs text-slate-500">
+              Mỗi card là một kênh thật. Bên trong tách rõ Short, Bài ảnh và Long để bạn nhìn nhanh slot nào đang chờ, đang đăng hoặc lỗi.
+            </p>
+          </div>
+
+          {Object.keys(byChannel).length === 0 ? (
+            <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 py-20 text-slate-600">
+              <CalendarPlus className="h-10 w-10" />
+              <p className="mt-3 text-sm">Không có video nào đang chờ đăng</p>
+              <p className="mt-1 text-xs text-slate-700">Video đã đăng xong xem tại <a href="/publishing/analytics" className="text-rose-400 hover:underline">Phân tích</a></p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {Object.entries(byChannel).map(([chId, { label, short, quote, long }]) => (
+                <ChannelGroup key={chId} channelLabel={label} short={short} quote={quote} long={long} onUpdate={reload} />
+              ))}
             </div>
           )}
         </div>
-      )}
-
-      {/* Queue by channel */}
-      {Object.keys(byChannel).length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16 gap-3 text-slate-600">
-          <CalendarPlus className="h-10 w-10" />
-          <p className="text-sm">Không có video nào đang chờ đăng</p>
-          <p className="text-xs text-slate-700">Video đã đăng xong xem tại <a href="/publishing/analytics" className="text-rose-400 hover:underline">Phân tích</a></p>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {Object.entries(byChannel).map(([chId, { label, short, quote, long }]) => (
-            <ChannelGroup key={chId} channelLabel={label} short={short} quote={quote} long={long} onUpdate={reload} />
-          ))}
-        </div>
-      )}
+      </div>
     </div>
   );
 }
