@@ -1,0 +1,62 @@
+services:
+  # ── TTS Server (VieNeu-TTS, CPU mode) ──────────────────────────────────────
+  tts:
+    build:
+      context: ./tts-server
+      dockerfile: Dockerfile
+    platform: linux/arm64          # Mac M4 native ARM64
+    container_name: cp_tts
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    volumes:
+      # Dùng lại model đã tải về host (tránh download lại ~500MB)
+      - ~/.cache/huggingface:/root/.cache/huggingface:ro
+      # Audio output: container ghi vào, Next.js app đọc từ host
+      - ./media/audio:/media/audio
+      # Hot-reload server code: chỉ cần restart container, không rebuild image
+      - ./tts-server/server.py:/app/server.py:ro
+    environment:
+      TTS_PORT: "8765"
+      MEDIA_AUDIO_DIR: /media/audio
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8765/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s   # VieNeu load model mất ~30-60s
+      retries: 3
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: cp_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+      POSTGRES_DB: content_pipeline
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"   # Use 5433 to avoid conflict with other postgres instances
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cp_app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file: .env.local
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

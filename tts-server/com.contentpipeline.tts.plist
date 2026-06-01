@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.contentpipeline.tts</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/bichtuyen/venv-tts-new/bin/python</string>
+        <string>/Users/bichtuyen/code/content_pipline/tts-server/server.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TTS_PORT</key>
+        <string>8765</string>
+        <key>MEDIA_AUDIO_DIR</key>
+        <string>/Users/bichtuyen/code/content_pipline/media/audio</string>
+    </dict>
+
+    <!-- Tự start khi login -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart nếu crash -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Log -->
+    <key>StandardOutPath</key>
+    <string>/Users/bichtuyen/code/content_pipline/tts-server/tts.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/bichtuyen/code/content_pipline/tts-server/tts-error.log</string>
+
+    <!-- Đợi 5s trước khi restart khi crash -->
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+</dict>
+</plist>

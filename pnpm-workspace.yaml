@@ -1,0 +1,12 @@
+allowBuilds:
+  '@ffmpeg-installer/darwin-arm64': set this to true or false
+  esbuild: set this to true or false
+  ffmpeg-static: set this to true or false
+  sharp: set this to true or false
+  unrs-resolver: set this to true or false
+onlyBuiltDependencies:
+  - sharp
+  - unrs-resolver
+  - ffmpeg-static
+  - '@ffmpeg-installer/darwin-arm64'
+  - esbuild
