@@ -1,0 +1,492 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-06-06T02:35:44.725Z",
+  "report_date": "2026-06-06",
+  "channel": {
+    "id": 10,
+    "name": "Tầng Sâu",
+    "platform": "youtube"
+  },
+  "analytics": {
+    "retention_available": true,
+    "scope_warning": null
+  },
+  "videos": [
+    {
+      "video_id": "2vwxbb-UYgM",
+      "content_id": "qgen-mq0gx45l-7otu1",
+      "title": "Có những ngày ta cần khoảng lặng hơn là thêm lời khuyên #Shorts",
+      "topic": "Có những ngày ta cần khoảng lặng hơn là thêm lời khuyên",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "published_at": "2026-06-05T10:00:31Z",
+      "age_hours": 16.59,
+      "views": 797,
+      "likes": 11,
+      "comments": 0,
+      "like_rate": 0.01,
+      "views_per_hour": 48.04,
+      "likes_per_hour": 0.66,
+      "comments_per_hour": null,
+      "retention_available": true,
+      "average_view_percentage": null,
+      "average_view_duration_sec": null
+    },
+    {
+      "video_id": "Tidq-yPeI-U",
+      "content_id": "qgen-mq0gxa6e-an0pe",
+      "title": "Khi thôi cần được công nhận, lòng người nhẹ đi rất nhiều #Shorts",
+      "topic": "Khi thôi cần được công nhận, lòng người nhẹ đi rất nhiều",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "published_at": "2026-06-05T11:00:27Z",
+      "age_hours": 15.59,
+      "views": 1001,
+      "likes": 13,
+      "comments": 0,
+      "like_rate": 0.01,
+      "views_per_hour": 64.21,
+      "likes_per_hour": 0.83,
+      "comments_per_hour": null,
+      "retention_available": true,
+      "average_view_percentage": null,
+      "average_view_duration_sec": null
+    },
+    {
+      "video_id": "OJOewzN9U9Y",
+      "content_id": "qgen-mq0gxfh9-j1jq2",
+      "title": "Sách hay không dạy ta sống, chỉ giúp ta thôi sống hời hợt #Shorts",
+      "topic": "Sách hay không dạy ta sống, chỉ giúp ta thôi sống hời hợt",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "published_at": "2026-06-05T12:01:23Z",
+      "age_hours": 14.57,
+      "views": 0,
+      "likes": 0,
+      "comments": 0,
+      "like_rate": null,
+      "views_per_hour": null,
+      "likes_per_hour": null,
+      "comments_per_hour": null,
+      "retention_available": true,
+      "average_view_percentage": null,
+      "average_view_duration_sec": null
+    },
+    {
+      "video_id": "FSIqJl5Hc8k",
+      "content_id": "qgen-mq0gxlhi-753u7",
+      "title": "Có những đêm ta không buồn, chỉ thấy mình trống #Shorts",
+      "topic": "Có những đêm ta không buồn, chỉ thấy mình trống",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "published_at": "2026-06-05T13:00:27Z",
+      "age_hours": 13.59,
+      "views": 0,
+      "likes": 0,
+      "comments": 0,
+      "like_rate": null,
+      "views_per_hour": null,
+      "likes_per_hour": null,
+      "comments_per_hour": null,
+      "retention_available": true,
+      "average_view_percentage": null,
+      "average_view_duration_sec": null
+    },
+    {
+      "video_id": "3kBAogPZO7M",
+      "content_id": "qgen-mq0gxqx8-fwxm8",
+      "title": "Cô đơn giữa một thành phố quá đông người #Shorts",
+      "topic": "Cô đơn giữa một thành phố quá đông người",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "published_at": "2026-06-05T14:01:26Z",
+      "age_hours": 12.57,
+      "views": 0,
+      "likes": 0,
+      "comments": 0,
+      "like_rate": null,
+      "views_per_hour": null,
+      "likes_per_hour": null,
+      "comments_per_hour": null,
+      "retention_available": true,
+      "average_view_percentage": null,
+      "average_view_duration_sec": null
+    },
+    {
+      "video_id": "0OdnqdLCByM",
+      "content_id": "qgen-mq0ifsh8-5t3cn",
+      "title": "Có khi ta sống quá lâu trong phiên bản người khác mong muốn #Shorts",
+      "topic": "Có khi ta sống quá lâu trong phiên bản người khác mong muốn",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "published_at": "2026-06-06T00:01:26Z",
+      "age_hours": 2.57,
+      "views": 545,
+      "likes": 9,
+      "comments": 0,
+      "like_rate": 0.02,
+      "views_per_hour": 212.06,
+      "likes_per_hour": 3.5,
+      "comments_per_hour": null,
+      "retention_available": true,
+      "average_view_percentage": null,
+      "average_view_duration_sec": null
+    },
+    {
+      "video_id": "brjH513rBcg",
+      "content_id": "qgen-mq0ig1yp-kwhvp",
+      "title": "Khao khát tự do đôi khi chỉ là khao khát được sống thật #Shorts",
+      "topic": "Khao khát tự do đôi khi chỉ là khao khát được sống thật",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "published_at": "2026-06-06T01:00:26Z",
+      "age_hours": 1.59,
+      "views": 21,
+      "likes": 0,
+      "comments": 0,
+      "like_rate": null,
+      "views_per_hour": 13.21,
+      "likes_per_hour": null,
+      "comments_per_hour": null,
+      "retention_available": true,
+      "average_view_percentage": null,
+      "average_view_duration_sec": null
+    },
+    {
+      "video_id": "rk77lv1kqHk",
+      "content_id": "qgen-mq0ig85r-ck3uf",
+      "title": "Có những người nói rất nhiều nhưng không ai thật sự hiểu họ #Shorts",
+      "topic": "Có những người nói rất nhiều nhưng không ai thật sự hiểu họ",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "published_at": "2026-06-06T02:00:46Z",
+      "age_hours": 0.58,
+      "views": 231,
+      "likes": 4,
+      "comments": 0,
+      "like_rate": 0.02,
+      "views_per_hour": 398.28,
+      "likes_per_hour": 6.9,
+      "comments_per_hour": null,
+      "retention_available": true,
+      "average_view_percentage": null,
+      "average_view_duration_sec": null
+    }
+  ],
+  "format_families": {
+    "short_quote": {
+      "video_count": 8,
+      "total_views": 2595,
+      "avg_views": 324.38,
+      "median_views": 126,
+      "avg_views_per_hour": 147.16,
+      "avg_like_rate": 0.02,
+      "avg_retention": null
+    }
+  },
+  "leaderboards": {
+    "top_views": [
+      {
+        "video_id": "Tidq-yPeI-U",
+        "format_label": "short_quote (fallback)",
+        "value": 1001
+      },
+      {
+        "video_id": "2vwxbb-UYgM",
+        "format_label": "short_quote (fallback)",
+        "value": 797
+      },
+      {
+        "video_id": "0OdnqdLCByM",
+        "format_label": "short_quote (fallback)",
+        "value": 545
+      },
+      {
+        "video_id": "rk77lv1kqHk",
+        "format_label": "short_quote (fallback)",
+        "value": 231
+      },
+      {
+        "video_id": "brjH513rBcg",
+        "format_label": "short_quote (fallback)",
+        "value": 21
+      }
+    ],
+    "top_views_per_hour": [
+      {
+        "video_id": "rk77lv1kqHk",
+        "format_label": "short_quote (fallback)",
+        "value": 398.28
+      },
+      {
+        "video_id": "0OdnqdLCByM",
+        "format_label": "short_quote (fallback)",
+        "value": 212.06
+      },
+      {
+        "video_id": "Tidq-yPeI-U",
+        "format_label": "short_quote (fallback)",
+        "value": 64.21
+      },
+      {
+        "video_id": "2vwxbb-UYgM",
+        "format_label": "short_quote (fallback)",
+        "value": 48.04
+      },
+      {
+        "video_id": "brjH513rBcg",
+        "format_label": "short_quote (fallback)",
+        "value": 13.21
+      }
+    ],
+    "top_retention": [],
+    "top_like_rate": [
+      {
+        "video_id": "0OdnqdLCByM",
+        "format_label": "short_quote (fallback)",
+        "value": 0.02
+      },
+      {
+        "video_id": "rk77lv1kqHk",
+        "format_label": "short_quote (fallback)",
+        "value": 0.02
+      },
+      {
+        "video_id": "2vwxbb-UYgM",
+        "format_label": "short_quote (fallback)",
+        "value": 0.01
+      },
+      {
+        "video_id": "Tidq-yPeI-U",
+        "format_label": "short_quote (fallback)",
+        "value": 0.01
+      }
+    ]
+  },
+  "queued_batch": [
+    {
+      "content_id": "qgen-mq0ignu6-7lvlb",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "scheduled_at_vn": "10:00 06/06/2026",
+      "topic": "Có những ngày ta cần khoảng lặng hơn là thêm lời khuyên"
+    },
+    {
+      "content_id": "qgen-mq0igtqz-u8ikg",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "scheduled_at_vn": "11:00 06/06/2026",
+      "topic": "Cô đơn giữa một thành phố quá đông người"
+    },
+    {
+      "content_id": "qgen-mq0igyxx-kok5m",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "scheduled_at_vn": "12:00 06/06/2026",
+      "topic": "Có những đêm ta không buồn, chỉ thấy mình trống"
+    },
+    {
+      "content_id": "qgen-mq0ih4xi-taeor",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "scheduled_at_vn": "13:00 06/06/2026",
+      "topic": "Khi thôi cần được công nhận, lòng người nhẹ đi rất nhiều"
+    },
+    {
+      "content_id": "qgen-mq0ihb5s-7g75b",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "scheduled_at_vn": "14:00 06/06/2026",
+      "topic": "Bản ngã thích chiến thắng, còn nội tâm chỉ muốn được yên"
+    },
+    {
+      "content_id": "qgen-mq0ihgv0-gywbw",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "scheduled_at_vn": "15:00 06/06/2026",
+      "topic": "Điều mệt nhất không phải bận rộn mà là không còn cảm thấy mình đang sống"
+    },
+    {
+      "content_id": "qgen-mq0ihmdm-tavpv",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "scheduled_at_vn": "16:00 06/06/2026",
+      "topic": "Sự im lặng đúng lúc nói nhiều hơn mọi lời giải thích"
+    },
+    {
+      "content_id": "qgen-mq0ijqnb-dprgz",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "scheduled_at_vn": "17:00 06/06/2026",
+      "topic": "Có khi ta sống quá lâu trong phiên bản người khác mong muốn"
+    },
+    {
+      "content_id": "qgen-mq0ijxkp-3fv56",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "scheduled_at_vn": "18:00 06/06/2026",
+      "topic": "Cô đơn giữa một thành phố quá đông người"
+    },
+    {
+      "content_id": "qgen-mq0ik30a-f5i36",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "scheduled_at_vn": "19:00 06/06/2026",
+      "topic": "Tự do nhất là khi không còn phải đóng vai ai nữa"
+    },
+    {
+      "content_id": "qgen-mq0ik8vt-2ms47",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "scheduled_at_vn": "20:00 06/06/2026",
+      "topic": "Sự im lặng đúng lúc nói nhiều hơn mọi lời giải thích"
+    },
+    {
+      "content_id": "qgen-mq0ikehm-dt818",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "scheduled_at_vn": "21:00 06/06/2026",
+      "topic": "Điều khó nhất không phải chọn đúng mà là dám chịu trách nhiệm"
+    },
+    {
+      "content_id": "qgen-mq0ikk9d-ufz2q",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "scheduled_at_vn": "22:00 06/06/2026",
+      "topic": "Khi thôi cần được công nhận, lòng người nhẹ đi rất nhiều"
+    },
+    {
+      "content_id": "qgen-mq0gmhzy-ldhqk",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "scheduled_at_vn": "07:00 07/06/2026",
+      "topic": "Có những sợi dây không ai buộc, nhưng ta vẫn mang theo nhiều năm"
+    },
+    {
+      "content_id": "qgen-mq0gwxyh-v5wm5",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "scheduled_at_vn": "08:00 07/06/2026",
+      "topic": "Triết lý không làm đời dễ hơn, nhưng làm ta bớt mù hơn"
+    },
+    {
+      "content_id": "qgen-mq0xeed8-amo7k",
+      "experiment_variant": "LEGACY_QUOTE_REFLECTION_V1",
+      "format_label": "quote_reflection",
+      "format_family": "reflection",
+      "scheduled_at_vn": "09:00 07/06/2026",
+      "topic": "Có những ngày ta cần khoảng lặng hơn là thêm lời khuyên"
+    },
+    {
+      "content_id": "qgen-mq0xdg7z-iled7",
+      "experiment_variant": "LEGACY_QUOTE_NO_VOICE_V2",
+      "format_label": "short_quote (fallback)",
+      "format_family": "short_quote",
+      "scheduled_at_vn": "10:00 07/06/2026",
+      "topic": "Nhiều lựa chọn không làm ta tự do hơn, chỉ làm ta mỏi hơn"
+    },
+    {
+      "content_id": "qgen-mq11xsny-gkd3p",
+      "experiment_variant": "LEGACY_QUOTE_KINETIC_TEXT_V1",
+      "format_label": "kinetic_text",
+      "format_family": "split_quote",
+      "scheduled_at_vn": "11:00 07/06/2026",
+      "topic": "Khi thôi cần được công nhận, lòng người nhẹ đi rất nhiều"
+    },
+    {
+      "content_id": "qgen-mq11xznu-qu186",
+      "experiment_variant": "LEGACY_QUOTE_REFLECTION_V1",
+      "format_label": "quote_reflection",
+      "format_family": "reflection",
+      "scheduled_at_vn": "12:00 07/06/2026",
+      "topic": "Triết lý không làm đời dễ hơn, nhưng làm ta bớt mù hơn"
+    },
+    {
+      "content_id": "qgen-mq11y6kd-d1tdc",
+      "experiment_variant": "LEGACY_QUOTE_REFLECTION_V1",
+      "format_label": "quote_reflection",
+      "format_family": "reflection",
+      "scheduled_at_vn": "13:00 07/06/2026",
+      "topic": "Có những cuốn sách không trả lời mà chỉ buộc ta nhìn lại mình"
+    },
+    {
+      "content_id": "qgen-mq11ydg8-zczkt",
+      "experiment_variant": "LEGACY_QUOTE_NOTE_LETTER_V1",
+      "format_label": "note_letter_card",
+      "format_family": "reflection",
+      "scheduled_at_vn": "14:00 07/06/2026",
+      "topic": "Có những người nói rất nhiều nhưng không ai thật sự hiểu họ"
+    },
+    {
+      "content_id": "qgen-mq11yk41-5qer6",
+      "experiment_variant": "LEGACY_QUOTE_BILINGUAL_MINIMAL_V1",
+      "format_label": "bilingual_minimal",
+      "format_family": "split_quote",
+      "scheduled_at_vn": "15:00 07/06/2026",
+      "topic": "Có những đêm ta không buồn, chỉ thấy mình trống"
+    },
+    {
+      "content_id": "qgen-mq11yruf-xn2ls",
+      "experiment_variant": "LEGACY_QUOTE_KINETIC_TEXT_V1",
+      "format_label": "kinetic_text",
+      "format_family": "split_quote",
+      "scheduled_at_vn": "16:00 07/06/2026",
+      "topic": "Một ý tưởng đúng lúc có thể thay đổi cả cách ta sống"
+    },
+    {
+      "content_id": "qgen-mq11yxwf-py32g",
+      "experiment_variant": "LEGACY_QUOTE_BILINGUAL_MINIMAL_V1",
+      "format_label": "bilingual_minimal",
+      "format_family": "split_quote",
+      "scheduled_at_vn": "17:00 07/06/2026",
+      "topic": "Có khi ta sống quá lâu trong phiên bản người khác mong muốn"
+    },
+    {
+      "content_id": "qgen-mq11z4rn-sfwz1",
+      "experiment_variant": "LEGACY_QUOTE_NOTE_LETTER_V1",
+      "format_label": "note_letter_card",
+      "format_family": "reflection",
+      "scheduled_at_vn": "18:00 07/06/2026",
+      "topic": "Sự im lặng đúng lúc nói nhiều hơn mọi lời giải thích"
+    }
+  ],
+  "observations": {
+    "data_observations": [
+      "All 8 published video(s) belong to format family \"short_quote\". No cross-family comparison is possible yet.",
+      "Highest views: Tidq-yPeI-U (short_quote (fallback)) — 1,001 views.",
+      "Highest velocity: rk77lv1kqHk (short_quote (fallback)) — 398.3 views/hour.",
+      "Average like/view ratio across all published videos: 1.50%.",
+      "No comments recorded on any published video yet."
+    ],
+    "hypotheses": [
+      "Videos range from 0.6h to 16.6h old. Raw view counts may reflect age differences rather than format quality — use views_per_hour for comparison."
+    ],
+    "insufficient_data": [
+      "Analytics API connected but no retention data returned. Videos may be too new for YouTube to have computed retention stats.",
+      "Format comparison (kinetic_text vs bilingual_minimal vs note_letter_card vs quote_reflection) is not possible yet — Batch 3 format-mix items are still queued."
+    ]
+  }
+}
