@@ -5,8 +5,10 @@ import path from "path";
 import { db } from "@/lib/db";
 import { socialChannels, uploadQueue, contentGenerations, appConfig, type SocialChannel } from "@/lib/db/schema";
 import { eq, desc, and, lte, notExists, inArray, isNull, isNotNull, gte, count } from "drizzle-orm";
+import { inferFormatType, type ContentFormatType } from "@/lib/content-format-type";
 import { uploadToYouTube, isQuotaExceededError, isAuthError, isTokenRevokedError, isTransientError, nextQuotaResetUtc, pacificMidnightUtc } from "@/lib/social/youtube-api";
 import {
+  connectFacebookPageManual,
   deleteFacebookPageContentBefore,
   previewFacebookPageDelete,
   uploadToFacebookPhotoPost,
@@ -20,11 +22,82 @@ import {
   type FacebookTokenInfo,
 } from "@/lib/social/facebook-api";
 import { renderFacebookQuoteImage } from "@/lib/social/facebook-quote";
+import { resolveFacebookQuoteImageSource, type FacebookQuoteImageSourceMode } from "@/lib/social/facebook-quote-source";
 import { buildDefaultVideoDescription, buildDefaultVideoTitle, buildFacebookQuoteText, buildYouTubeVideoMetadata } from "@/lib/social/youtube-metadata";
 import { sendTelegram } from "@/lib/social/telegram";
 import { upsertPublishedVideoFromUploadQueueId } from "@/actions/publishing-analytics";
+import {
+  getOverdueMinutes,
+  isUploadScheduledDue,
+  resolveRetryScheduledAt,
+} from "@/lib/upload-schedule";
+import {
+  DEFAULT_CHANNEL_KEY,
+  getChannelDefinition,
+  getChannelPublishConfig,
+  getChannelDestinations,
+  normalizeChannelKey,
+  resolveChannelKey,
+} from "@/lib/config/channel-configs";
+import { inferWorkspaceFromSignals } from "@/lib/channel-workspace-registry";
 
 type PublishQueueType = "short" | "long" | "quote";
+type UploadProcessResult = {
+  id: string;
+  ok: boolean;
+  error?: string;
+  overdueMinutes?: number;
+  sourceImageMode?: FacebookQuoteImageSourceMode;
+  sourceImagePath?: string;
+};
+
+async function getChannelPublishSafety(
+  channelKeyValue: string | null | undefined,
+  videoType: PublishQueueType,
+  options?: {
+    requireConfiguredDestinations?: boolean;
+  },
+): Promise<{ ok: true; channelKey: string; allowLegacyEnvFallback: boolean } | { ok: false; error: string }> {
+  const channelKey = normalizeChannelKey(channelKeyValue);
+  if (!channelKey) {
+    return { ok: false, error: `Content thiếu channelKey hợp lệ: ${channelKeyValue ?? "null"}` };
+  }
+
+  const config = await getChannelPublishConfig(channelKey);
+  if (!config) {
+    return { ok: false, error: `Không tìm thấy publish config cho channel "${channelKey}"` };
+  }
+  if (!config.publishingEnabled) {
+    return { ok: false, error: `Channel "${channelKey}" chưa bật publishing` };
+  }
+
+  const destinations = getChannelDestinations(config, videoType);
+  const hasExplicitDestinations = destinations.length > 0;
+  if (options?.requireConfiguredDestinations && !hasExplicitDestinations && channelKey !== DEFAULT_CHANNEL_KEY) {
+    return {
+      ok: false,
+      error: `Channel "${channelKey}" chưa có destination config cho ${videoType}`,
+    };
+  }
+
+  return {
+    ok: true,
+    channelKey,
+    allowLegacyEnvFallback: config.allowLegacyEnvFallback,
+  };
+}
+
+function getDestinationOwnershipError(
+  contentChannelKeyValue: string | null | undefined,
+  destinationChannelKeyValue: string | null | undefined,
+  destinationName: string,
+): string | null {
+  const contentChannelKey = resolveChannelKey(contentChannelKeyValue);
+  const destinationChannelKey = resolveChannelKey(destinationChannelKeyValue);
+  if (contentChannelKey === destinationChannelKey) return null;
+
+  return `Destination "${destinationName}" thuộc channel "${destinationChannelKey}", không khớp với content channel "${contentChannelKey}"`;
+}
 
 // ─── Facebook env-based connect ───────────────────────────────────────────
 
@@ -70,14 +143,55 @@ export async function rotateFacebookPageTokenAction(userAccessToken: string): Pr
   };
 }
 
+export async function connectFacebookPageManualAction(input: {
+  channelKey: string;
+  pageId: string;
+  pageAccessToken: string;
+}): Promise<
+  | { ok: true; channelId: number; name: string; pageId: string; channelKey: string; message: string }
+  | { ok: false; error: string }
+> {
+  const channelKey = normalizeChannelKey(input.channelKey);
+  if (!channelKey) {
+    return { ok: false, error: "channelKey không hợp lệ" };
+  }
+
+  const channelDefinition = getChannelDefinition(channelKey);
+  if (channelDefinition.allowLegacyEnvFallback) {
+    return { ok: false, error: "Kết nối Facebook thủ công chỉ dành cho channel không dùng env fallback." };
+  }
+
+  const result = await connectFacebookPageManual({
+    channelKey,
+    pageId: input.pageId,
+    pageAccessToken: input.pageAccessToken,
+  });
+  if (!result.ok) return result;
+
+  return {
+    ok: true,
+    channelId: result.channelId,
+    name: result.pageName,
+    pageId: result.pageId,
+    channelKey: result.channelKey,
+    message: result.message,
+  };
+}
+
 // ─── Channel Management ────────────────────────────────────────────────────
 
-export async function getChannelsAction(platform?: string): Promise<SocialChannel[]> {
+export async function getChannelsAction(platform?: string, channelKeyValue?: string): Promise<SocialChannel[]> {
   if (!platform || platform === "facebook") {
     await refreshFacebookEnvHealth().catch(() => null);
   }
+  const channelKey = normalizeChannelKey(channelKeyValue);
   const rows = await db.query.socialChannels.findMany({
-    where: platform ? (t, { eq: e }) => e(t.platform, platform) : undefined,
+    where: (t, { and, eq: e }) => {
+      const conds = [];
+      if (platform) conds.push(e(t.platform, platform));
+      if (channelKey) conds.push(e(t.channelKey, channelKey));
+      return conds.length ? and(...conds) : undefined;
+    },
     orderBy: (t, { asc }) => asc(t.createdAt),
   });
   return rows;
@@ -110,6 +224,8 @@ export type UploadQueueRow = {
   contentId: string;
   channelId: number;
   channelName: string;
+  channelKey: string | null;
+  platformChannelId: string | null;
   platformAccountId: number | null;
   platformAccountName: string | null;
   platform: string;
@@ -128,6 +244,14 @@ export type UploadQueueRow = {
   // joined from content
   topic: string;
   nicheName: string;
+  contentExperimentId: string | null;
+  contentExperimentVariant: string | null;
+  contentChannelKey: string | null;
+  contentProfileKey: string | null;
+  formatType: ContentFormatType;
+  workspaceId: string | null;
+  workspaceName: string | null;
+  workspacePromptProfileId: string | null;
 };
 
 export async function getUploadQueueAction(filters?: {
@@ -146,14 +270,25 @@ export async function getUploadQueueAction(filters?: {
     },
     with: {
       channel: {
-        columns: { name: true, platformAccountId: true },
+        columns: { name: true, platformAccountId: true, channelKey: true, platformChannelId: true },
         with: {
           platformAccount: {
             columns: { displayName: true },
           },
         },
       },
-      content: { columns: { topic: true, nicheName: true } },
+      content: {
+        columns: {
+          topic: true,
+          nicheName: true,
+          experimentId: true,
+          experimentVariant: true,
+          formatType: true,
+          contentMode: true,
+          channelKey: true,
+          contentProfileKey: true,
+        },
+      },
     },
     orderBy: (t, { asc, desc: d }) => [
       asc(t.scheduledAt),
@@ -162,29 +297,56 @@ export async function getUploadQueueAction(filters?: {
     limit: filters?.limit ?? 100,
   });
 
-  return rows.map(r => ({
-    id: r.id,
-    contentId: r.contentId,
-    channelId: r.channelId,
-    channelName: r.channel.name,
-    platformAccountId: r.channel.platformAccountId,
-    platformAccountName: r.channel.platformAccount?.displayName ?? null,
-    platform: r.platform,
-    videoType: r.videoType,
-    title: r.title,
-    description: r.description,
-    tags: (r.tags as string[]) ?? [],
-    privacyStatus: r.privacyStatus,
-    scheduledAt: r.scheduledAt,
-    status: r.status,
-    errorMessage: r.errorMessage,
-    platformVideoId: r.platformVideoId,
-    platformVideoUrl: r.platformVideoUrl,
-    uploadedAt: r.uploadedAt,
-    createdAt: r.createdAt,
-    topic: r.content.topic,
-    nicheName: r.content.nicheName,
-  }));
+  return rows.map((r) => {
+    const workspace = inferWorkspaceFromSignals({
+      channelKey: r.content.channelKey ?? r.channel.channelKey,
+      platform: r.platform,
+      platformChannelId: r.channel.platformChannelId,
+    });
+
+    return {
+      id: r.id,
+      contentId: r.contentId,
+      channelId: r.channelId,
+      channelName: r.channel.name,
+      channelKey: r.channel.channelKey,
+      platformChannelId: r.channel.platformChannelId,
+      platformAccountId: r.channel.platformAccountId,
+      platformAccountName: r.channel.platformAccount?.displayName ?? null,
+      platform: r.platform,
+      videoType: r.videoType,
+      title: r.title,
+      description: r.description,
+      tags: (r.tags as string[]) ?? [],
+      privacyStatus: r.privacyStatus,
+      scheduledAt: r.scheduledAt,
+      status: r.status,
+      errorMessage: r.errorMessage,
+      platformVideoId: r.platformVideoId,
+      platformVideoUrl: r.platformVideoUrl,
+      uploadedAt: r.uploadedAt,
+      createdAt: r.createdAt,
+      topic: r.content.topic,
+      nicheName: r.content.nicheName,
+      contentExperimentId: r.content.experimentId,
+      contentExperimentVariant: r.content.experimentVariant,
+      contentChannelKey: r.content.channelKey,
+      contentProfileKey: r.content.contentProfileKey,
+      formatType:
+        r.videoType === "quote"
+          ? "facebook_quote_photo"
+          : r.videoType === "long"
+            ? "long_video"
+            : inferFormatType({
+                formatType: r.content.formatType,
+                experimentId: r.content.experimentId,
+                contentMode: r.content.contentMode,
+              }),
+      workspaceId: workspace?.workspaceId ?? null,
+      workspaceName: workspace?.displayName ?? null,
+      workspacePromptProfileId: workspace?.promptProfileId ?? null,
+    };
+  });
 }
 
 export async function scheduleUploadAction(input: {
@@ -216,6 +378,10 @@ export async function scheduleUploadAction(input: {
     where: eq(socialChannels.id, input.channelId),
   });
   if (!channel) return { error: "Kênh không tồn tại" };
+  const publishSafety = await getChannelPublishSafety(content.channelKey, input.videoType);
+  if (!publishSafety.ok) return { error: publishSafety.error };
+  const ownershipError = getDestinationOwnershipError(content.channelKey, channel.channelKey, channel.name);
+  if (ownershipError) return { error: ownershipError };
   if (channel.platform === "facebook" && input.videoType === "long") {
     return { error: "Facebook hiện chỉ hỗ trợ đăng short/reel hoặc bài ảnh quote trong app này" };
   }
@@ -246,9 +412,22 @@ export async function cancelUploadAction(id: string): Promise<{ success: boolean
   return { success: true };
 }
 
-export async function retryUploadAction(id: string): Promise<{ success: boolean }> {
+export async function retryUploadAction(
+  id: string,
+  options?: { forcePublish?: boolean },
+): Promise<{ success: boolean }> {
+  const row = await db.query.uploadQueue.findFirst({
+    where: eq(uploadQueue.id, id),
+  });
+  if (!row) return { success: false };
+
   await db.update(uploadQueue)
-    .set({ status: "queued", errorMessage: null, updatedAt: new Date() })
+    .set({
+      status: "queued",
+      errorMessage: null,
+      scheduledAt: resolveRetryScheduledAt(row.scheduledAt, options),
+      updatedAt: new Date(),
+    })
     .where(eq(uploadQueue.id, id));
   return { success: true };
 }
@@ -439,6 +618,7 @@ export async function bulkScheduleAction(input: {
     where: eq(socialChannels.id, input.channelId),
   });
   if (!channel) return { scheduled: 0, skipped: 0, error: "Kênh không tồn tại" };
+  const destinationChannelKey = resolveChannelKey(channel.channelKey);
   if (channel.platform === "facebook" && input.videoType === "long") {
     return { scheduled: 0, skipped: 0, error: "Facebook hiện chỉ hỗ trợ đăng short/reel hoặc bài ảnh quote trong app này" };
   }
@@ -552,7 +732,15 @@ export async function bulkScheduleAction(input: {
   const contentIds = targets.map(t => t.id);
   const contents = await db.query.contentGenerations.findMany({
     where: (t, { inArray: ia }) => ia(t.id, contentIds),
-    columns: { id: true, topic: true, shortContent: true, longContent: true, longYoutubeDescription: true },
+    columns: {
+      id: true,
+      topic: true,
+      shortContent: true,
+      longContent: true,
+      longYoutubeDescription: true,
+      contentProfileKey: true,
+      channelKey: true,
+    },
   });
   const contentMap = new Map(contents.map(c => [c.id, c]));
 
@@ -568,12 +756,27 @@ export async function bulkScheduleAction(input: {
     if (!slot) { skipped++; continue; }
 
     const content = contentMap.get(target.id);
+    const publishSafety = await getChannelPublishSafety(content?.channelKey, input.videoType);
+    if (!publishSafety.ok) {
+      skipped++;
+      continue;
+    }
+    const ownershipError = getDestinationOwnershipError(
+      content?.channelKey,
+      destinationChannelKey,
+      channel.name,
+    );
+    if (ownershipError) {
+      skipped++;
+      continue;
+    }
     const topic = content?.topic ?? target.topic;
     const metadata = input.videoType === "quote"
       ? {
           title: buildFacebookQuoteText({
             topic,
             shortContent: content?.shortContent,
+            contentProfileKey: content?.contentProfileKey,
           }).slice(0, 100),
           description: buildDefaultVideoDescription({
             platform: "facebook",
@@ -583,6 +786,7 @@ export async function bulkScheduleAction(input: {
             shortContent: content?.shortContent,
             longContent: content?.longContent,
             longYoutubeDescription: content?.longYoutubeDescription,
+            contentProfileKey: content?.contentProfileKey,
           }),
           tags: [] as string[],
         }
@@ -594,12 +798,15 @@ export async function bulkScheduleAction(input: {
           shortContent: content?.shortContent,
           longContent: content?.longContent,
           longYoutubeDescription: content?.longYoutubeDescription,
+          contentProfileKey: content?.contentProfileKey,
         })
       : {
           title: buildDefaultVideoTitle({
             platform: "facebook",
             contentType: input.videoType,
             topic,
+            contentProfileKey: content?.contentProfileKey,
+            shortContent: content?.shortContent,
           }),
           description: buildDefaultVideoDescription({
             platform: "facebook",
@@ -609,6 +816,7 @@ export async function bulkScheduleAction(input: {
             shortContent: content?.shortContent,
             longContent: content?.longContent,
             longYoutubeDescription: content?.longYoutubeDescription,
+            contentProfileKey: content?.contentProfileKey,
           }),
           tags: [] as string[],
         };
@@ -899,8 +1107,21 @@ export async function autoScheduleVideoAction(
   contentId: string,
   videoType: PublishQueueType,
 ): Promise<void> {
-  const settings = await getAutoScheduleSettingsAction();
-  const destinations = getDestinationSettings(settings, videoType);
+  const content = await db.query.contentGenerations.findFirst({
+    where: eq(contentGenerations.id, contentId),
+    columns: { channelKey: true },
+  });
+  if (!content) return;
+
+  const publishSafety = await getChannelPublishSafety(content.channelKey, videoType, {
+    requireConfiguredDestinations: true,
+  });
+  if (!publishSafety.ok) return;
+
+  const config = await getChannelPublishConfig(publishSafety.channelKey);
+  if (!config) return;
+  if (!config.autoScheduleEnabled) return;
+  const destinations = getChannelDestinations(config, videoType);
   for (const cfg of destinations) {
     if (!cfg.enabled || !cfg.channelId) continue;
 
@@ -909,6 +1130,9 @@ export async function autoScheduleVideoAction(
       where: eq(socialChannels.id, cfg.channelId),
     });
     if (!configuredChannel) continue;
+    if (getDestinationOwnershipError(content.channelKey, configuredChannel.channelKey, configuredChannel.name)) {
+      continue;
+    }
     if (configuredChannel.platform === "facebook" && videoType === "long") continue;
     if (configuredChannel.platform === "youtube" && videoType === "quote") continue;
     const isExceeded = !!(configuredChannel.quotaExceededUntil && configuredChannel.quotaExceededUntil > new Date());
@@ -970,10 +1194,25 @@ async function findAvailableYouTubeChannel(
 
 // ─── Cron: process due upload queue items ─────────────────────────────────
 
-export async function processUploadQueueAction(platformFilter?: string): Promise<{
+export async function processUploadQueueAction(input?: string | {
+  platformFilter?: string;
+  dryRun?: boolean;
+  allowUpload?: boolean;
+  source?: "cron" | "scheduler_job" | "manual" | "script" | "verify";
+}): Promise<{
   processed: number;
-  results: { id: string; ok: boolean; error?: string }[];
+  results: UploadProcessResult[];
 }> {
+  const options = typeof input === "string"
+    ? { platformFilter: input }
+    : (input ?? {});
+  const platformFilter = options.platformFilter;
+  const dryRun = options.dryRun === true || (
+    options.allowUpload !== true &&
+    options.source != null &&
+    options.source !== "cron"
+  );
+
   // Reset items stuck in "uploading" for more than 10 minutes (crashed / OOM run)
   const stuckCutoff = new Date(Date.now() - 10 * 60 * 1000);
   await db.update(uploadQueue)
@@ -995,7 +1234,11 @@ export async function processUploadQueueAction(platformFilter?: string): Promise
     limit: 25,
   });
 
-  const dueFacebookItems = dueCandidates.filter((item) => item.platform === "facebook");
+  const dueFacebookItems = dueCandidates.filter(
+    (item) =>
+      item.platform === "facebook" &&
+      resolveChannelKey(item.channel.channelKey) === DEFAULT_CHANNEL_KEY,
+  );
   let facebookPreflightBlocked = false;
   if (dueFacebookItems.length > 0) {
     const health = await refreshFacebookEnvHealth();
@@ -1021,7 +1264,11 @@ export async function processUploadQueueAction(platformFilter?: string): Promise
   const due = [];
   const platformsThisRun = new Set<string>();
   for (const item of dueCandidates) {
-    if (facebookPreflightBlocked && item.platform === "facebook") continue;
+    if (
+      facebookPreflightBlocked &&
+      item.platform === "facebook" &&
+      resolveChannelKey(item.channel.channelKey) === DEFAULT_CHANNEL_KEY
+    ) continue;
     // One upload per platform per cron run. OAuth-client rotation still works
     // because alternate credentials keep platform="youtube".
     if (platformsThisRun.has(item.platform)) continue;
@@ -1029,13 +1276,61 @@ export async function processUploadQueueAction(platformFilter?: string): Promise
     due.push(item);
   }
 
-  const results: { id: string; ok: boolean; error?: string }[] = [];
+  const results: UploadProcessResult[] = [];
   const autoScheduleSettings = await getAutoScheduleSettingsAction();
 
   // Channels confirmed quota-exceeded in this cron run — skip API calls for them
   const quotaExceededThisRun = new Set<number>();
 
   for (const item of due) {
+    const now = new Date();
+    const scheduledAt = new Date(item.scheduledAt);
+    const overdueMinutes = getOverdueMinutes(scheduledAt, now);
+
+    if (!isUploadScheduledDue(scheduledAt, now)) {
+      results.push({ id: item.id, ok: false, error: "not_due_yet", overdueMinutes });
+      continue;
+    }
+
+    if (!item.channel.isActive) {
+      const err = `Channel "${item.channel.name}" đang tắt nên chưa thể đăng`;
+      await db.update(uploadQueue).set({
+        status: "error",
+        errorMessage: err,
+        updatedAt: new Date(),
+      }).where(eq(uploadQueue.id, item.id));
+      results.push({ id: item.id, ok: false, error: err, overdueMinutes });
+      continue;
+    }
+
+    const publishSafety = await getChannelPublishSafety(
+      item.content.channelKey,
+      item.videoType as PublishQueueType,
+    );
+    if (!publishSafety.ok) {
+      await db.update(uploadQueue).set({
+        status: "error",
+        errorMessage: publishSafety.error,
+        updatedAt: new Date(),
+      }).where(eq(uploadQueue.id, item.id));
+      results.push({ id: item.id, ok: false, error: publishSafety.error });
+      continue;
+    }
+    const destinationOwnershipError = getDestinationOwnershipError(
+      item.content.channelKey,
+      item.channel.channelKey,
+      item.channel.name,
+    );
+    if (destinationOwnershipError) {
+      await db.update(uploadQueue).set({
+        status: "error",
+        errorMessage: destinationOwnershipError,
+        updatedAt: new Date(),
+      }).where(eq(uploadQueue.id, item.id));
+      results.push({ id: item.id, ok: false, error: destinationOwnershipError });
+      continue;
+    }
+
     if (item.platform === "facebook" && item.channel.needsReconnect) {
       const deferUntil = new Date(Date.now() + 6 * 60 * 60 * 1000);
       await db.update(uploadQueue).set({
@@ -1132,6 +1427,11 @@ export async function processUploadQueueAction(platformFilter?: string): Promise
       continue;
     }
 
+    if (dryRun) {
+      results.push({ id: item.id, ok: false, error: "dry_run", overdueMinutes });
+      continue;
+    }
+
     // ── Atomically claim: only proceed if we successfully move queued→uploading ─
     // This prevents two concurrent processUploadQueueAction calls from
     // uploading the same item (race between SELECT and UPDATE).
@@ -1154,6 +1454,38 @@ export async function processUploadQueueAction(platformFilter?: string): Promise
         .where(eq(uploadQueue.id, item.id));
       results.push({ id: item.id, ok: false, error: err });
       continue;
+    }
+
+    // TTS Short pre-publish safety check: if content starts with "---" (a Markdown
+    // separator that VieNeu-TTS may speak as a prosody token, elongating the first
+    // spoken word) AND the video file was rendered before the sanitizer fix was
+    // applied (2026-06-04T04:33:00Z / 11:33 VN), block with a clear error so the
+    // asset can be re-rendered with the fixed normalizer before going live.
+    // Legacy Quote Shorts have no audioPath and are intentionally excluded.
+    if (
+      item.videoType === "short" &&
+      item.content.audioPath &&
+      /^\s*-{3,}\s*\n/.test(item.content.shortContent ?? "")
+    ) {
+      const SANITIZER_FIX_UTC = new Date("2026-06-04T04:33:00Z").getTime();
+      const absVideoPath = path.isAbsolute(videoPath!)
+        ? videoPath!
+        : path.join(process.cwd(), videoPath!);
+      let isPreSanitizerAsset = false;
+      try {
+        const stat = fs.statSync(absVideoPath);
+        isPreSanitizerAsset = stat.mtimeMs < SANITIZER_FIX_UTC;
+      } catch {
+        // File not accessible — other checks will handle the missing-file case
+      }
+      if (isPreSanitizerAsset) {
+        const err = "tts_asset_may_be_pre_sanitizer";
+        await db.update(uploadQueue)
+          .set({ status: "error", errorMessage: err, updatedAt: new Date() })
+          .where(eq(uploadQueue.id, item.id));
+        results.push({ id: item.id, ok: false, error: err });
+        continue;
+      }
     }
 
     if (item.platform === "youtube") {
@@ -1200,7 +1532,7 @@ export async function processUploadQueueAction(platformFilter?: string): Promise
 
         await cleanupUploadedMediaFiles(item.contentId, item.videoType as PublishQueueType);
 
-        results.push({ id: item.id, ok: true });
+        results.push({ id: item.id, ok: true, overdueMinutes });
 
       } else if (isQuotaExceededError(res.error)) {
         // Mark channel quota-exceeded (both in DB and in-run set)
@@ -1341,10 +1673,23 @@ export async function processUploadQueueAction(platformFilter?: string): Promise
       results.push({ id: item.id, ok: false, error: err });
       continue;
     }
+    if (!publishSafety.allowLegacyEnvFallback && !item.channel.accessToken) {
+      const err = `Channel "${publishSafety.channelKey}" không được phép dùng Facebook env fallback`;
+      await db.update(uploadQueue).set({
+        status: "error",
+        errorMessage: err,
+        updatedAt: new Date(),
+      }).where(eq(uploadQueue.id, item.id));
+      results.push({ id: item.id, ok: false, error: err });
+      continue;
+    }
     if (item.videoType === "quote") {
-      const sourceImage = ((item.content.imagePaths as string[] | null) ?? [])[0];
-      if (!sourceImage) {
-        const err = "Content chưa có ảnh short để dựng quote post";
+      const sourceImage = resolveFacebookQuoteImageSource({
+        contentId: item.contentId,
+        imagePaths: item.content.imagePaths as string[] | null,
+      });
+      if (!sourceImage.ok) {
+        const err = sourceImage.error;
         await db.update(uploadQueue).set({
           status: "error",
           errorMessage: err,
@@ -1360,7 +1705,7 @@ export async function processUploadQueueAction(platformFilter?: string): Promise
           contentId: item.contentId,
           topic: item.content.topic,
           shortContent: item.content.shortContent,
-          imagePath: sourceImage,
+          imagePath: sourceImage.sourceImagePath,
         });
         tempImagePath = rendered.imagePath;
         const res = await uploadToFacebookPhotoPost(item.channelId, {
@@ -1375,6 +1720,7 @@ export async function processUploadQueueAction(platformFilter?: string): Promise
                 shortContent: item.content.shortContent,
                 longContent: item.content.longContent,
                 longYoutubeDescription: item.content.longYoutubeDescription,
+                contentProfileKey: item.content.contentProfileKey,
               }),
         });
 
@@ -1392,7 +1738,13 @@ export async function processUploadQueueAction(platformFilter?: string): Promise
 
           await cleanupUploadedMediaFiles(item.contentId, item.videoType as PublishQueueType);
 
-          results.push({ id: item.id, ok: true });
+          results.push({
+            id: item.id,
+            ok: true,
+            overdueMinutes,
+            sourceImageMode: sourceImage.sourceImageMode,
+            sourceImagePath: sourceImage.sourceImagePath,
+          });
         } else {
           if (isFacebookAuthError(res.error)) {
             const deferUntil = new Date(Date.now() + 6 * 60 * 60 * 1000);
@@ -1418,7 +1770,13 @@ export async function processUploadQueueAction(platformFilter?: string): Promise
               `Lỗi: <code>${res.error.slice(0, 180)}</code>\n` +
               `Các bài Facebook đã được tạm hoãn 6 giờ để tránh spam lỗi.`
             );
-            results.push({ id: item.id, ok: false, error: "facebook_auth_paused" });
+            results.push({
+              id: item.id,
+              ok: false,
+              error: "facebook_auth_paused",
+              sourceImageMode: sourceImage.sourceImageMode,
+              sourceImagePath: sourceImage.sourceImagePath,
+            });
           } else if (isFacebookRateLimitError(res.error) || isFacebookTransientError(res.error)) {
             const deferUntil = new Date(Date.now() + 30 * 60 * 1000);
             await db.update(uploadQueue).set({
@@ -1427,14 +1785,26 @@ export async function processUploadQueueAction(platformFilter?: string): Promise
               errorMessage: res.error,
               updatedAt: new Date(),
             }).where(eq(uploadQueue.id, item.id));
-            results.push({ id: item.id, ok: false, error: "facebook_retry_deferred" });
+            results.push({
+              id: item.id,
+              ok: false,
+              error: "facebook_retry_deferred",
+              sourceImageMode: sourceImage.sourceImageMode,
+              sourceImagePath: sourceImage.sourceImagePath,
+            });
           } else {
             await db.update(uploadQueue).set({
               status: "error",
               errorMessage: res.error,
               updatedAt: new Date(),
             }).where(eq(uploadQueue.id, item.id));
-            results.push({ id: item.id, ok: false, error: res.error });
+            results.push({
+              id: item.id,
+              ok: false,
+              error: res.error,
+              sourceImageMode: sourceImage.sourceImageMode,
+              sourceImagePath: sourceImage.sourceImagePath,
+            });
           }
         }
       } finally {
@@ -1454,6 +1824,7 @@ export async function processUploadQueueAction(platformFilter?: string): Promise
           shortContent: item.content.shortContent,
           longContent: item.content.longContent,
           longYoutubeDescription: item.content.longYoutubeDescription,
+          contentProfileKey: item.content.contentProfileKey,
         });
     const res = await uploadToFacebookReel(item.channelId, {
       videoPath: videoPath!,
@@ -1479,7 +1850,7 @@ export async function processUploadQueueAction(platformFilter?: string): Promise
 
         await cleanupUploadedMediaFiles(item.contentId, item.videoType as PublishQueueType);
 
-        results.push({ id: item.id, ok: true });
+        results.push({ id: item.id, ok: true, overdueMinutes });
       } else {
         if (isFacebookAuthError(res.error)) {
           const deferUntil = new Date(Date.now() + 6 * 60 * 60 * 1000);

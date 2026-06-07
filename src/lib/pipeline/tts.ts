@@ -34,6 +34,10 @@ function sanitizeVoiceName(voice: string): string {
 function normalizeTextForTTS(text: string): string {
   return text
     .replace(/\r\n/g, "\n")
+    // Prompt output can include Markdown separators like "---" at the start.
+    // VieNeu-TTS may treat them as speakable/prosody tokens and stretch the
+    // first real word, so strip standalone separators before newline folding.
+    .replace(/^\s*(?:[-*_]\s*){3,}\s*$/gm, " ")
     .replace(/\n{2,}/g, ". ")
     .replace(/\n+/g, " ")
     .replace(/\s+([,.;:!?])/g, "$1")
@@ -56,11 +60,7 @@ async function normalizeAudioWithLoudnorm(inputPath: string, outputPath: string)
     "-y",
     "-i", inputPath,
     "-af",
-    [
-      "silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.05",
-      "stop_periods=-1:stop_threshold=-50dB:stop_duration=0.35:stop_silence=0.16:detection=rms",
-      "loudnorm=I=-16:TP=-1.5:LRA=11",
-    ].join(","),
+    "silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.05:stop_periods=-1:stop_threshold=-50dB:stop_duration=0.35:stop_silence=0.16:detection=rms,loudnorm=I=-16:TP=-1.5:LRA=11",
     "-ar", "48000",
     "-ac", "1",
     "-c:a", "pcm_s16le",
