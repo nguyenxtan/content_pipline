@@ -6,8 +6,20 @@ import { promisify } from "util";
 import { db } from "@/lib/db";
 import { contentGenerations, niches } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
-import { buildSubtitleChunks, buildSubtitleChunksFromWords, buildAssFile, SpeechSegment, WordTimestamp } from "@/lib/video/subtitle";
+import { createPromptVersionEntry, mergePromptVersions } from "@/lib/prompt-version-registry";
+import {
+  buildSubtitleChunks,
+  buildSubtitleChunksFromWords,
+  buildAssFile,
+  SpeechSegment,
+  validateAndRepairSubtitleChunks,
+  WordTimestamp,
+  buildSubtitleRenderMetadata,
+  SubtitleRenderMetadata,
+} from "@/lib/video/subtitle";
 import { getLibx264Args, getVideoToolboxArgs, isAppleSilicon } from "@/lib/pipeline/perf";
+import { generateShortCover } from "@/lib/short-cover-engine";
+import { generateShortCoverAsset } from "@/lib/image/short-cover-asset-generator";
 
 const execFileAsync = promisify(execFile);
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -26,6 +38,46 @@ const SHORT_COVER_ACCENT_Y = 132;
 const SHORT_COVER_ACCENT_WIDTH = 8;
 const SHORT_COVER_ACCENT_HEIGHT = 190;
 const SHORT_SUBTITLE_MARGIN_V = 340;
+const SHORT_COVER_INTRO_DURATION_DEFAULT_SEC = 1.5;
+const SHORT_COVER_INTRO_FADE_OUT_DEFAULT_SEC = 0.25;
+const PHAT_PHAP_SHORT_FORMATS = new Set(["tts_short", "legacy_quote_short"]);
+
+function readBooleanEnv(name: string, fallback: boolean): boolean {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  if (["1", "true", "yes", "on"].includes(raw)) return true;
+  if (["0", "false", "no", "off"].includes(raw)) return false;
+  return fallback;
+}
+
+function readNumberEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  const parsed = raw ? Number(raw) : NaN;
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+// Ken Burns slow-zoom flag — disabled by default until experiment is validated.
+// When enabled, applies a subtle 100→103% zoom over the full video duration.
+// Phase 3 implementation: set SHORT_ZOOM_ENABLED=true in .env.local to activate.
+const SHORT_ZOOM_ENABLED = readBooleanEnv("SHORT_ZOOM_ENABLED", false);
+
+function getShortCoverIntroConfig(audioDuration: number): {
+  enabled: boolean;
+  durationSec: number;
+  fadeOutSec: number;
+} {
+  const enabled = readBooleanEnv("SHORT_COVER_INTRO_ENABLED", false);
+  const durationSec = Math.max(
+    0.25,
+    Math.min(audioDuration, readNumberEnv("SHORT_COVER_DURATION_SEC", SHORT_COVER_INTRO_DURATION_DEFAULT_SEC))
+  );
+  const fadeOutSec = Math.max(
+    0,
+    Math.min(durationSec - 0.05, readNumberEnv("SHORT_COVER_FADE_OUT_SEC", SHORT_COVER_INTRO_FADE_OUT_DEFAULT_SEC))
+  );
+
+  return { enabled, durationSec, fadeOutSec };
+}
 
 function pickBgMusic(category: string, seed: string): string | null {
   const dir = path.join(MUSIC_BASE, category);
@@ -87,8 +139,25 @@ async function getAudioSpeechSegments(absPath: string, totalDuration: number): P
 }
 
 export type ShortVideoResult =
-  | { success: true; videoPath: string; durationMs: number }
+  | { success: true; videoPath: string; durationMs: number; subtitleHealthScore: number; subtitleStatus: "PASS" | "FAIL"; subtitleMetadata: SubtitleRenderMetadata }
   | { success: false; error: string };
+
+/**
+ * Resolve a cross-platform fonts directory for ffmpeg subtitles filter.
+ * Returns null if no known font directory exists (ffmpeg uses system default).
+ */
+function resolveFontsDir(): string | null {
+  const candidates = [
+    "/Library/Fonts",                  // macOS system
+    `${process.env.HOME}/Library/Fonts`, // macOS user
+    "/usr/share/fonts",                // Linux (Debian/Ubuntu/CentOS)
+    "/usr/local/share/fonts",          // Linux user-installed
+  ];
+  for (const dir of candidates) {
+    if (dir && fs.existsSync(dir)) return dir;
+  }
+  return null;
+}
 
 function buildImageDurations(totalDuration: number, count: number): number[] {
   if (count <= 1) return [totalDuration];
@@ -226,21 +295,59 @@ export async function runShortVideo(contentId: string, bgMusicOverride?: boolean
 
     const rawDuration   = await getAudioDuration(absAudio);
     const audioDuration = Math.min(rawDuration, SHORT_MAX_SEC);
+    const shortCoverIntro = getShortCoverIntroConfig(audioDuration);
 
     // Prefer Whisper word timestamps for accurate subtitle alignment
+    const speechSegments = await getAudioSpeechSegments(absAudio, audioDuration);
     const wordTimestamps = await getWhisperWordTimestamps(absAudio);
+
+    // validationSegments: reference speech bounds used for drift checking.
+    // When Whisper succeeds, use Whisper's first/last word times — this is more
+    // accurate than silencedetect when AiMax audio has trailing reverb or low-level
+    // noise that silencedetect wrongly marks as speech (causes false drift failures).
+    let validationSegments: SpeechSegment[] | undefined;
     let chunks;
     if (wordTimestamps.length >= 5) {
       chunks = buildSubtitleChunksFromWords(wordTimestamps, shortContent);
+      const whisperStart = wordTimestamps[0].start;
+      const whisperEnd = wordTimestamps[wordTimestamps.length - 1].end;
+      validationSegments = [{ start: whisperStart, end: whisperEnd }];
+      console.log(
+        `[subtitle] contentId=${contentId} provider=aimax whisperRange=${whisperStart.toFixed(2)}–${whisperEnd.toFixed(2)}s` +
+        ` audioDuration=${audioDuration.toFixed(2)}s trailingNoise=${(audioDuration - whisperEnd).toFixed(2)}s`,
+      );
     } else {
-      const speechSegments = await getAudioSpeechSegments(absAudio, audioDuration);
       chunks = buildSubtitleChunks(shortContent, audioDuration, speechSegments.length > 0 ? speechSegments : undefined);
+      validationSegments = speechSegments.length > 0 ? speechSegments : undefined;
+    }
+    const subtitleValidation = validateAndRepairSubtitleChunks(
+      chunks,
+      audioDuration,
+      validationSegments,
+    );
+    chunks = subtitleValidation.chunks;
+    if (subtitleValidation.status === "FAIL") {
+      throw new Error(
+        `Subtitle validation failed (${subtitleValidation.subtitleHealthScore}/100): ${subtitleValidation.issues.join(" ")}`
+      );
     }
     const n = absImages.length;
     const imageDurations = buildImageDurations(audioDuration, n);
     const coverDuration = Math.min(imageDurations[0], SHORT_COVER_OVERLAY_SEC);
-    fs.writeFileSync(assPath, buildAssFile(chunks, VIDEO_WIDTH, VIDEO_HEIGHT, contentId, SHORT_SUBTITLE_MARGIN_V), "utf-8");
-    fs.writeFileSync(coverAssPath, buildCoverAssFile(chooseCoverTitle(topic, shortContent), coverDuration), "utf-8");
+    // When cover intro is enabled, suppress subtitle events that fall inside the intro window
+    // so the opening cover text is not visually cluttered by simultaneous subtitle lines.
+    // Chunks wholly inside the window are dropped; chunks crossing the boundary are clamped.
+    // This only affects the .ass render — subtitle validation already ran on the full chunk set.
+    const introCutSec = shortCoverIntro.enabled ? shortCoverIntro.durationSec : 0;
+    const renderChunks = introCutSec > 0
+      ? chunks
+          .map(c => c.end <= introCutSec ? null : c.start < introCutSec ? { ...c, start: introCutSec } : c)
+          .filter((c): c is NonNullable<typeof c> => c !== null)
+      : chunks;
+    fs.writeFileSync(assPath, buildAssFile(renderChunks, VIDEO_WIDTH, VIDEO_HEIGHT, contentId, SHORT_SUBTITLE_MARGIN_V), "utf-8");
+    if (!shortCoverIntro.enabled) {
+      fs.writeFileSync(coverAssPath, buildCoverAssFile(chooseCoverTitle(topic, shortContent), coverDuration), "utf-8");
+    }
     const args: string[] = ["-y"];
     for (const [index, img] of absImages.entries()) {
       args.push("-loop", "1", "-t", imageDurations[index].toFixed(3), "-i", img);
@@ -249,21 +356,125 @@ export async function runShortVideo(contentId: string, bgMusicOverride?: boolean
     args.push("-t", String(SHORT_MAX_SEC), "-i", absAudio);
     if (bgMusic) args.push("-stream_loop", "-1", "-i", bgMusic);
 
+    // ── Short Cover Asset ─────────────────────────────────────────────────────
+    // Generated unconditionally for tracking + potential first-frame overlay.
+    // Non-fatal: video render continues if generation fails.
+    let shortCoverAssetPath: string | null = null;   // absolute path (for FFmpeg)
+    let coverAssetRelPath: string | null = null;     // relative path (for DB, ADR-019)
+    let introCoverText: string | null = null;
+    let coverReason: string | null = null;
+    let coverConfidence: number | null = null;
+    let coverStatus: "generated" | "reused_existing" | "metadata_only" | "missing" = "missing";
+    let coverError: string | null = null;
+    let coverWasReused = false;
+    try {
+      const cover = generateShortCover({
+        topic,
+        selectedHook: item.shortSelectedHook,
+        script: shortContent || item.script,
+      });
+      introCoverText = cover.coverText;
+      coverReason = cover.coverReason;
+      coverConfidence = cover.confidence;
+      const relPath = `media/covers/${contentId}-short-cover.jpg`;
+      const existingAbsPath = item.shortCoverAssetPath
+        ? path.join(process.cwd(), item.shortCoverAssetPath.replace(/^\/+/, ""))
+        : null;
+      if (existingAbsPath && fs.existsSync(existingAbsPath)) {
+        shortCoverAssetPath = existingAbsPath;
+        coverAssetRelPath = item.shortCoverAssetPath!;
+        coverWasReused = true;
+        coverStatus = "reused_existing";
+        console.log(`[COVER_ASSET] reused | coverText: "${cover.coverText}" | path: ${relPath} | 1080x1920`);
+      } else {
+        const coverAsset = await generateShortCoverAsset({
+          contentId,
+          topic,
+          hookOrScriptExcerpt: item.shortSelectedHook || shortContent || item.script,
+          sourceImagePath: (imagePaths as string[])[0] ?? null,
+          coverText: cover.coverText,
+          layoutPreset: "short_cover_hook",
+        });
+        shortCoverAssetPath = coverAsset.outputPath;
+        coverAssetRelPath = relPath;
+        coverStatus = "generated";
+        console.log(
+          `[COVER_ASSET] generated | coverText: "${cover.coverText}" | path: ${relPath}` +
+          ` | ${coverAsset.width}x${coverAsset.height} | readability: ${coverAsset.readabilityScore} | reused: false`
+        );
+      }
+    } catch (coverErr) {
+      const coverErrMsg = coverErr instanceof Error ? coverErr.message : String(coverErr);
+      coverError = coverErrMsg;
+      if (introCoverText) coverStatus = "metadata_only";
+      console.error(`[COVER_ASSET] failed for ${contentId}: ${coverErrMsg}`);
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    if (shortCoverIntro.enabled && shortCoverAssetPath) {
+      args.push("-loop", "1", "-t", shortCoverIntro.durationSec.toFixed(3), "-i", shortCoverAssetPath);
+    }
+
+    // Ken Burns: when SHORT_ZOOM_ENABLED, apply a subtle 100→103% zoom over each image's duration.
+    // Zoompan upscales by 3% first so the zoom has headroom without black borders.
+    const buildImageScaleFilter = (i: number, durationSec: number): string => {
+      if (SHORT_ZOOM_ENABLED) {
+        const totalFrames = Math.ceil(durationSec * 30);
+        // Zoom from 1.00 to 1.03 over the clip, centred
+        return (
+          `[${i}:v]scale=${Math.round(VIDEO_WIDTH * 1.06)}:${Math.round(VIDEO_HEIGHT * 1.06)}` +
+          `:force_original_aspect_ratio=increase,crop=${Math.round(VIDEO_WIDTH * 1.06)}:${Math.round(VIDEO_HEIGHT * 1.06)},setsar=1,` +
+          `zoompan=z='1+0.001*on':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${totalFrames}:s=${VIDEO_WIDTH}x${VIDEO_HEIGHT}:fps=30` +
+          `[v${i}]`
+        );
+      }
+      return `[${i}:v]scale=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:force_original_aspect_ratio=increase,crop=${VIDEO_WIDTH}:${VIDEO_HEIGHT},setsar=1[v${i}]`;
+    };
+
     const scaleFilters = absImages.map((_, i) =>
-      `[${i}:v]scale=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:force_original_aspect_ratio=increase,crop=${VIDEO_WIDTH}:${VIDEO_HEIGHT},setsar=1[v${i}]`
+      buildImageScaleFilter(i, imageDurations[i] ?? audioDuration)
     ).join(";");
     const concatIn  = absImages.map((_, i) => `[v${i}]`).join("");
     const escapedAss = escapeAssPath(assPath);
-    const escapedCoverAss = escapeAssPath(coverAssPath);
-    const assFilter = `ass='${escapedAss}':fontsdir='/Library/Fonts'`;
-    const coverAssFilter = `ass='${escapedCoverAss}':fontsdir='/Library/Fonts'`;
+    const fontsDir = resolveFontsDir();
+    const assFilter = fontsDir
+      ? `ass='${escapedAss}':fontsdir='${escapeAssPath(fontsDir)}'`
+      : `ass='${escapedAss}'`;
     const coverWindowExpr = `between(t,0,${coverDuration.toFixed(3)})`;
     const titleScrim = `drawbox=x=0:y=0:w=iw:h=360:color=black@0.14:t=fill:enable='${coverWindowExpr}'`;
     const titleAccent = `drawbox=x=${SHORT_COVER_ACCENT_X}:y=${SHORT_COVER_ACCENT_Y}:w=${SHORT_COVER_ACCENT_WIDTH}:h=${SHORT_COVER_ACCENT_HEIGHT}:color=white@0.96:t=fill:enable='${coverWindowExpr}'`;
+    const audioInputIndex = n;
+    const bgMusicInputIndex = bgMusic ? n + 1 : null;
+    const shortCoverInputIndex = shortCoverIntro.enabled && shortCoverAssetPath ? n + (bgMusic ? 2 : 1) : null;
+    const introFadeStart = Math.max(0, shortCoverIntro.durationSec - shortCoverIntro.fadeOutSec);
 
     let filterComplex: string;
     let audioMap: string;
-    if (bgMusic) {
+    if (shortCoverIntro.enabled && shortCoverInputIndex !== null) {
+      const introFilters = [
+        scaleFilters,
+        `${concatIn}concat=n=${n}:v=1:a=0[vraw]`,
+        `[${shortCoverInputIndex}:v]scale=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:force_original_aspect_ratio=increase,crop=${VIDEO_WIDTH}:${VIDEO_HEIGHT},setsar=1,format=rgba,fade=t=out:st=${introFadeStart.toFixed(3)}:d=${shortCoverIntro.fadeOutSec.toFixed(3)}:alpha=1[vintro]`,
+        `[vraw][vintro]overlay=0:0:enable='lt(t,${shortCoverIntro.durationSec.toFixed(3)})'[vbase]`,
+        `[vbase]${assFilter}[vout]`,
+      ];
+
+      if (bgMusic && bgMusicInputIndex !== null) {
+        introFilters.push(
+          `[${bgMusicInputIndex}:a]volume=0.12,atrim=duration=${audioDuration.toFixed(3)}[bgm]`,
+          `[${audioInputIndex}:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]`
+        );
+        audioMap = "[aout]";
+      } else {
+        audioMap = `${audioInputIndex}:a`;
+      }
+
+      filterComplex = introFilters.join(";");
+    } else if (bgMusic) {
+      const escapedCoverAss = escapeAssPath(coverAssPath);
+      const coverAssFilter = fontsDir
+        ? `ass='${escapedCoverAss}':fontsdir='${escapeAssPath(fontsDir)}'`
+        : `ass='${escapedCoverAss}'`;
       filterComplex = [
         scaleFilters,
         `${concatIn}concat=n=${n}:v=1:a=0[vraw]`,
@@ -272,11 +483,15 @@ export async function runShortVideo(contentId: string, bgMusicOverride?: boolean
         `[vscrim]${titleAccent}[vband]`,
         `[vband]${coverAssFilter}[vcover]`,
         `[vcover]${assFilter}[vout]`,
-        `[${n + 1}:a]volume=0.12,atrim=duration=${audioDuration.toFixed(3)}[bgm]`,
-        `[${n}:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]`,
+        `[${bgMusicInputIndex}:a]volume=0.12,atrim=duration=${audioDuration.toFixed(3)}[bgm]`,
+        `[${audioInputIndex}:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]`,
       ].join(";");
       audioMap = "[aout]";
     } else {
+      const escapedCoverAss = escapeAssPath(coverAssPath);
+      const coverAssFilter = fontsDir
+        ? `ass='${escapedCoverAss}':fontsdir='${escapeAssPath(fontsDir)}'`
+        : `ass='${escapedCoverAss}'`;
       filterComplex = [
         scaleFilters,
         `${concatIn}concat=n=${n}:v=1:a=0[vraw]`,
@@ -286,7 +501,7 @@ export async function runShortVideo(contentId: string, bgMusicOverride?: boolean
         `[vband]${coverAssFilter}[vcover]`,
         `[vcover]${assFilter}[vout]`,
       ].join(";");
-      audioMap = `${n}:a`;
+      audioMap = `${audioInputIndex}:a`;
     }
 
     const baseArgs = [...args, "-filter_complex", filterComplex, "-map", "[vout]", "-map", audioMap];
@@ -305,11 +520,103 @@ export async function runShortVideo(contentId: string, bgMusicOverride?: boolean
 
     const durationMs = Date.now() - startMs;
     const relVideo   = `media/videos/${contentId}-short.mp4`;
+
+    // Build and persist subtitle render metadata sidecar
+    const subtitleMetadata = buildSubtitleRenderMetadata({
+      contentId,
+      videoPath:    relVideo,
+      subtitlePath: assPath,   // temp path; already flushed to disk at this point
+      marginV:      SHORT_SUBTITLE_MARGIN_V,
+      subtitleExists: true,    // we wrote it above; any error before this would have thrown
+    });
+    const metadataPath = path.join(VIDEOS_DIR, `${contentId}-short-subtitle-meta.json`);
+    fs.writeFileSync(metadataPath, JSON.stringify(subtitleMetadata, null, 2), "utf-8");
+
+    if (subtitleMetadata.validationResult === "FAIL") {
+      const errMsg = `Subtitle render validation failed: ${subtitleMetadata.validationErrors.join("; ")}`;
+      await db.update(contentGenerations)
+        .set({ videoStatus: "error", videoErrorMessage: errMsg })
+        .where(eq(contentGenerations.id, contentId));
+      return { success: false, error: errMsg };
+    }
+
+    const coverSourceFields = [
+      "topic",
+      item.shortSelectedHook ? "shortSelectedHook" : null,
+      shortContent ? "shortContent" : null,
+      item.script ? "script" : null,
+      item.hookPattern ? "hookPattern" : null,
+      item.hookType ? "hookType" : null,
+    ].filter((value): value is string => Boolean(value));
+    const coverPromptVersions = mergePromptVersions(item.promptVersions, {
+      cover: createPromptVersionEntry("cover", {
+        mode: "short",
+        details: {
+          status: coverStatus,
+          metadataSource: "render_pipeline_v1",
+          coverText: introCoverText,
+          coverReason,
+          confidence: coverConfidence,
+          sourceFields: coverSourceFields,
+          assetPath: coverAssetRelPath,
+          assetSupported: Boolean(shortCoverAssetPath || coverAssetRelPath),
+          error: coverError,
+        },
+      }),
+    });
+
     await db.update(contentGenerations)
-      .set({ videoStatus: "done", videoPath: relVideo, videoErrorMessage: null })
+      .set({
+        videoStatus: "done",
+        videoPath: relVideo,
+        videoErrorMessage: null,
+        promptVersions: coverPromptVersions,
+        ...(introCoverText ? {
+          shortCoverText: introCoverText,
+        } : {}),
+        ...(coverAssetRelPath ? {
+          shortCoverAssetPath: coverAssetRelPath,
+          ...(!coverWasReused ? { shortCoverGeneratedAt: new Date() } : {}),
+        } : {}),
+      })
       .where(eq(contentGenerations.id, contentId));
 
-    return { success: true, videoPath: relVideo, durationMs };
+    if (
+      item.channelKey === "phat_phap" &&
+      PHAT_PHAP_SHORT_FORMATS.has(item.formatType ?? "") &&
+      !introCoverText
+    ) {
+      console.warn(
+        `[COVER_COVERAGE] missing metadata | contentId=${contentId} | channel=phat_phap | format=${item.formatType ?? "null"}`
+      );
+    }
+
+    // When cover intro was rendered, persist experiment tracking fields.
+    // Guards: write only if not already set. Experiment fields are stamped before render
+    // by the controlled rollout script, so == null means "not a rollout item" → skip.
+    if (shortCoverIntro.enabled && introCoverText) {
+      const needsThumb      = !item.thumbnailText?.trim();
+      const needsExpId      = item.experimentId      == null;
+      const needsExpVariant = item.experimentVariant == null;
+      if (needsThumb || needsExpId || needsExpVariant) {
+        await db.update(contentGenerations)
+          .set({
+            ...(needsThumb      ? { thumbnailText:    introCoverText }          : {}),
+            ...(needsExpId      ? { experimentId:     "short-cover-intro-v1" }  : {}),
+            ...(needsExpVariant ? { experimentVariant: "intro_on_1p5s" }         : {}),
+          })
+          .where(eq(contentGenerations.id, contentId));
+      }
+    }
+
+    return {
+      success: true,
+      videoPath: relVideo,
+      durationMs,
+      subtitleHealthScore: subtitleValidation.subtitleHealthScore,
+      subtitleStatus: subtitleValidation.status,
+      subtitleMetadata,
+    };
   } catch (err) {
     const msg = (err instanceof Error ? err.message : String(err)).slice(0, 600);
     await db.update(contentGenerations)

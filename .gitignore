@@ -50,6 +50,10 @@ next-env.d.ts
 /media/videos/**/*.mp4
 /media/videos/**/*.mov
 /media/completed/**
+/media/story-audio/**/*.wav
+/media/story-audio/**/*.mp3
+/media/story-audio/**/*.json
+/media/story-audio/**/*.srt
 # Giữ lại folder structure + nhạc nền (commit)
 !/media/audio/.gitkeep
 !/media/images/.gitkeep

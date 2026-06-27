@@ -10,6 +10,7 @@ interface Props {
   items: ContentGenerationRow[];
   activeTab: ContentTab;
   isLoading: boolean;
+  searchTerm?: string;
   onView: (item: ContentGenerationRow) => void;
   onEditStatus: (item: ContentGenerationRow) => void;
   onLock: (id: string) => Promise<void>;
@@ -48,6 +49,7 @@ export function ContentGalleryGrid({
   items,
   activeTab,
   isLoading,
+  searchTerm,
   onView,
   onEditStatus,
   onLock,
@@ -177,9 +179,20 @@ export function ContentGalleryGrid({
   }
 
   if (items.length === 0) {
+    const isIdSearch = !!searchTerm && searchTerm.length >= 7 && /^[0-9a-f-]+$/i.test(searchTerm);
     return (
-      <div className="rounded-xl border border-slate-700 bg-slate-900 py-20 text-center">
-        <p className="text-slate-500 text-sm">Không có kết quả phù hợp.</p>
+      <div className="rounded-xl border border-slate-700 bg-slate-900 py-16 text-center space-y-2">
+        <p className="text-slate-400 text-sm">Không có kết quả phù hợp.</p>
+        {searchTerm && (
+          <p className="text-slate-600 text-xs">
+            {isIdSearch ? "ID" : "Chủ đề"}: <span className="font-mono text-slate-500">&ldquo;{searchTerm}&rdquo;</span>
+          </p>
+        )}
+        <p className="text-slate-700 text-xs">
+          {isIdSearch
+            ? "Thử đầy đủ UUID hoặc xóa bộ lọc."
+            : "Thử tên chủ đề khác, hoặc nhập 8 ký tự đầu của ID."}
+        </p>
       </div>
     );
   }

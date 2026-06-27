@@ -1,23 +1,33 @@
 "use server";
 
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { db } from "@/lib/db";
-import { contentGenerations, contentSchedulerJobs, promptTemplates, uploadQueue, publishedVideos } from "@/lib/db/schema";
+import { contentGenerations, contentSchedulerJobs, promptTemplates, publishedVideos, socialChannels, uploadQueue } from "@/lib/db/schema";
 import { eq, desc, asc, ilike, and, count, inArray, gte } from "drizzle-orm";
 import { getOpenRouterClient } from "@/lib/llm/openai-client";
 import { calcCost } from "@/lib/ai-models";
 import { logApiUsage } from "@/actions/ai-usage";
-import { DEFAULT_SHORT_PROMPT, DEFAULT_LONG_PROMPT } from "@/lib/content-prompts";
+import { DEFAULT_PSYCHOLOGY_SHORT_PROMPT, DEFAULT_SHORT_PROMPT, DEFAULT_LONG_PROMPT } from "@/lib/content-prompts";
+import { checkCapacityGate, notifyBackpressureIfNeeded } from "@/lib/production-capacity";
 import { runTTS } from "@/lib/pipeline/tts";
 import { runImages } from "@/lib/pipeline/images";
 import { runLongImages } from "@/lib/pipeline/long-images";
 import { runShortVideo } from "@/lib/pipeline/short-video";
 import { runLongVideo } from "@/lib/pipeline/long-video";
-import { runHookEngine } from "@/lib/hook-engine";
+import { runHookEngine, inferHookPattern, inferHookType, type ScoredHook } from "@/lib/hook-engine";
 import {
   runScriptEngine,
 } from "@/lib/script-engine";
+import { createPromptVersionEntry, mergePromptVersions } from "@/lib/prompt-version-registry";
+import { getContentExperimentAssignment } from "@/lib/content-experiments";
+import { getContentProfile, resolveContentProfileKey } from "@/lib/config/content-profiles";
+import { getChannelPublishConfig, resolveChannelKey } from "@/lib/config/channel-configs";
+import { inferStrategicTopicFamily, STRATEGIC_FAMILY_DISPLAY } from "@/lib/config/topic-family-registry";
+import { pickBuddhistSprintTopicFamily, sprintAllocationSummary, PHAT_PHAP_SPRINT } from "@/lib/config/sprint-config";
+import { generateQuoteShortsAction } from "@/actions/quote-generator";
+import { pickVoiceForContent } from "@/lib/voice-rotation";
 import {
   getRecommendedLongBatchSize,
   getRecommendedLongConcurrency,
@@ -36,7 +46,11 @@ import {
 } from "@/lib/validations/content-generator";
 import { cronRunLogs } from "@/lib/db/schema";
 import type { CronRunLog } from "@/lib/db/schema";
-import { autoScheduleVideoAction, processUploadQueueAction } from "@/actions/social-channels";
+import { autoScheduleVideoAction } from "@/actions/social-channels";
+import { inferFormatType, isLongVideoContent, isTtsShortContent } from "@/lib/content-format-type";
+import { resolveQuoteSchedulingTarget } from "@/lib/quotes/quote-scheduling-target";
+import { getYoutubeQuoteSchedulerPolicy } from "@/lib/quotes/youtube-quote-scheduler-policy";
+import { getTangSauIsolationViolation } from "@/lib/content-profile-isolation";
 
 const MODEL =
   process.env.CONTENT_GEN_MODEL ??
@@ -48,6 +62,12 @@ function applyTemplate(template: string, vars: Record<string, string>): string {
     (t, [k, v]) => t.replaceAll(`{{${k}}}`, v),
     template
   );
+}
+
+function getDefaultShortPrompt(contentProfileKey: string | null | undefined): string {
+  return getContentProfile(contentProfileKey).key === "psychology"
+    ? DEFAULT_PSYCHOLOGY_SHORT_PROMPT
+    : DEFAULT_SHORT_PROMPT;
 }
 
 const DISALLOWED_TOPIC_PATTERNS = [
@@ -97,12 +117,17 @@ async function generateShortHooksAndScript(params: {
   nicheName: string;
   nicheDescription?: string | null;
   tone?: string | null;
+  contentProfileKey?: string | null;
   shortBasePrompt: string;
   dedupBlock: string;
 }): Promise<{
   hookCandidates: string[];
   selectedHook: string;
   shortContent: string;
+  hookScoredCandidates: ScoredHook[];
+  hookScore: number | null;
+  hookPattern: string;
+  hookType: string;
   usage: { hookIn: number; hookOut: number; pickIn: number; pickOut: number; shortIn: number; shortOut: number };
 }> {
   const hookEngine = await runHookEngine({
@@ -112,6 +137,7 @@ async function generateShortHooksAndScript(params: {
     nicheName: params.nicheName,
     nicheDescription: params.nicheDescription,
     tone: params.tone,
+    contentProfileKey: params.contentProfileKey,
     dedupBlock: params.dedupBlock,
     count: 20,
   });
@@ -122,15 +148,25 @@ async function generateShortHooksAndScript(params: {
     topic: params.topic,
     nicheName: params.nicheName,
     selectedHook: hookEngine.selectedHook,
+    contentProfileKey: params.contentProfileKey,
     mode: "short",
     shortBasePrompt: params.shortBasePrompt + params.dedupBlock,
   });
   if (shortScript.mode !== "short") throw new Error("Short script engine returned invalid mode");
 
+  const hookScore = hookEngine.scoredHooks.find(h => h.hook === hookEngine.selectedHook)?.scores.total ?? null;
+
+  const hookPattern = inferHookPattern(hookEngine.selectedHook);
+  const hookType = inferHookType(hookEngine.selectedHook);
+
   return {
     hookCandidates: hookEngine.hooks,
     selectedHook: hookEngine.selectedHook,
     shortContent: shortScript.result.script,
+    hookScoredCandidates: hookEngine.scoredHooks,
+    hookScore,
+    hookPattern,
+    hookType,
     usage: {
       hookIn: hookEngine.usage.generateIn,
       hookOut: hookEngine.usage.generateOut,
@@ -228,6 +264,10 @@ export async function getContentPromptsAction(nicheId: number): Promise<{
   short: string; long: string;
   shortModel: string; longModel: string;
 }> {
+  const niche = await db.query.niches.findFirst({
+    where: (n, { eq: e }) => e(n.id, nicheId),
+    columns: { contentProfileKey: true },
+  });
   const [shortTpl, longTpl] = await Promise.all([
     db.query.promptTemplates.findFirst({
       where: (t, { and: a, eq: e }) =>
@@ -239,7 +279,7 @@ export async function getContentPromptsAction(nicheId: number): Promise<{
     }),
   ]);
   return {
-    short: shortTpl?.content ?? DEFAULT_SHORT_PROMPT,
+    short: shortTpl?.content ?? getDefaultShortPrompt(niche?.contentProfileKey),
     long: longTpl?.content ?? DEFAULT_LONG_PROMPT,
     shortModel: shortTpl?.model ?? MODEL,
     longModel: longTpl?.model ?? MODEL,
@@ -297,6 +337,7 @@ export async function suggestTopicsAction(
   nicheId: number,
   model = "openai/gpt-4o-mini",
   count = 8,
+  topicFamily?: string,
 ): Promise<{ topics: string[] } | { error: string }> {
   const niche = await db.query.niches.findFirst({
     where: (n, { eq: e }) => e(n.id, nicheId),
@@ -309,11 +350,48 @@ export async function suggestTopicsAction(
     ? `\n\nCác tiêu đề ĐÃ LÀM trong 14 ngày qua (TUYỆT ĐỐI không tạo nội dung tương tự, trùng lặp về chủ đề hoặc góc nhìn):\n${recentTopics.slice(0, 30).map((t, i) => `${i + 1}. ${t}`).join("\n")}\n`
     : "";
 
+  // Inject sprint family hint for Buddhist content — guides LLM toward target family
+  const familyDisplayName = topicFamily
+    ? (STRATEGIC_FAMILY_DISPLAY[topicFamily as keyof typeof STRATEGIC_FAMILY_DISPLAY] ?? topicFamily)
+    : null;
+  const familyBlock = familyDisplayName
+    ? `\n\nChủ đề PHẢI thuộc nhóm nội dung: "${familyDisplayName}". Tập trung vào góc nhìn, cảm xúc, và câu chuyện liên quan đến nhóm này.`
+    : "";
+
   const nicheContext = `Phân mục YouTube: "${niche.name}"${niche.description ? ` — ${niche.description}` : ""}${niche.targetAudience ? `\nĐối tượng: ${niche.targetAudience}` : ""}`;
+  const profile = getContentProfile(niche.contentProfileKey);
 
   const client = getOpenRouterClient();
-  const prompt = count === 1
-    ? `${nicheContext}${dedupBlock}
+  const prompt = profile.key === "psychology"
+    ? (count === 1
+      ? `${nicheContext}${dedupBlock}
+Gợi ý 1 chủ đề ngắn gọn cho video short về tâm lý, quan hệ, trưởng thành và hành vi con người.
+
+Yêu cầu:
+- Chủ đề phải là một cảm xúc, trạng thái, hành vi, hoặc tình huống rất thật trong đời sống hiện đại
+- Viết như một nhãn chủ đề ngắn, KHÔNG phải tiêu đề YouTube
+- Độ dài: 2-7 từ tiếng Việt
+- Ưu tiên các kiểu chủ đề như: "Bị thao túng cảm xúc", "Ngại giải thích", "Sợ làm phiền", "Tử tế quá mức", "Im lặng sau tổn thương", "Áp lực phải ổn"
+- KHÔNG dùng mở đầu kiểu tiêu đề như: "Khám phá...", "Bí quyết...", "Lời dạy..."
+- KHÔNG dùng khung Phật giáo, tôn giáo, nghiệp, nhân quả
+- Không dùng dấu hai chấm, không dùng câu hoàn chỉnh, không giật tít
+- Chủ đề phải KHÁC BIỆT hoàn toàn với danh sách đã liệt kê
+- Chỉ trả về chủ đề duy nhất, không thêm giải thích, không đánh số, không dấu ngoặc kép`
+      : `${nicheContext}${dedupBlock}
+Gợi ý ${count} chủ đề ngắn gọn cho video short về tâm lý, quan hệ, trưởng thành và hành vi con người.
+
+Yêu cầu:
+- Mỗi chủ đề phải là một cảm xúc, trạng thái, hành vi, hoặc tình huống rất thật trong đời sống hiện đại
+- Viết như một nhãn chủ đề ngắn, KHÔNG phải tiêu đề YouTube
+- Độ dài: 2-7 từ tiếng Việt
+- Ưu tiên các kiểu chủ đề như: "Bị thao túng cảm xúc", "Ngại giải thích", "Sợ làm phiền", "Tử tế quá mức", "Im lặng sau tổn thương", "Áp lực phải ổn"
+- KHÔNG dùng mở đầu kiểu tiêu đề như: "Khám phá...", "Bí quyết...", "Lời dạy..."
+- KHÔNG dùng khung Phật giáo, tôn giáo, nghiệp, nhân quả
+- Không dùng dấu hai chấm, không dùng câu hoàn chỉnh, không giật tít
+- Mỗi chủ đề phải KHÁC BIỆT hoàn toàn, không trùng lặp với nhau hoặc với danh sách đã liệt kê
+- Liệt kê đánh số 1. 2. 3. ... (mỗi dòng 1 chủ đề, không giải thích thêm)`)
+    : count === 1
+      ? `${nicheContext}${dedupBlock}${familyBlock}
 Gợi ý 1 chủ đề ngắn gọn cho video short về lĩnh vực trên.
 
 Yêu cầu:
@@ -325,7 +403,7 @@ Yêu cầu:
 - Không dùng dấu hai chấm, không dùng câu hoàn chỉnh, không giật tít
 - Chủ đề phải KHÁC BIỆT hoàn toàn với danh sách đã liệt kê
 - Chỉ trả về chủ đề duy nhất, không thêm giải thích, không đánh số, không dấu ngoặc kép`
-    : `${nicheContext}${dedupBlock}
+      : `${nicheContext}${dedupBlock}${familyBlock}
 Gợi ý ${count} chủ đề ngắn gọn cho video short về lĩnh vực trên.
 
 Yêu cầu:
@@ -395,7 +473,8 @@ export async function generateContentAction(
   nicheId: number,
   topic: string,
   scriptModel?: string,
-  contentMode: "short" | "long" | "both" = "both"
+  contentMode: "short" | "long" | "both" = "both",
+  topicFamily?: string,
 ): Promise<GeneratedContentResult | { error: string }> {
   const parsed = generateContentSchema.safeParse({ nicheId, topic });
   if (!parsed.success) {
@@ -409,12 +488,19 @@ export async function generateContentAction(
 
   const client = getOpenRouterClient();
   const start = Date.now();
+  const contentProfileKey = resolveContentProfileKey(niche.contentProfileKey);
+  const channelKey = resolveChannelKey(niche.channelKey);
 
   const script = "";
   let shortContent = "";
   let shortHookCandidates: string[] = [];
   let shortSelectedHook = "";
   let longContent = "";
+  let hookScoredCandidates: ScoredHook[] = [];
+  let hookScore: number | null = null;
+  let hookPattern: string | null = null;
+  let hookType: string | null = null;
+  let hookGeneratedAt: Date | null = null;
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
   let totalCost = 0;
@@ -425,6 +511,14 @@ export async function generateContentAction(
   const longTokens  = { in: 0, out: 0 };
   let shortModel = MODEL;
   let longModel  = MODEL;
+  const needShort = contentMode === "short" || contentMode === "both";
+  const needLong  = contentMode === "long"  || contentMode === "both";
+  let shortPromptTemplateId: number | null = null;
+  let shortPromptTemplateVersion: number | null = null;
+  let longPromptTemplateId: number | null = null;
+  let longPromptTemplateVersion: number | null = null;
+  // Generate ID before the try block so script/hook usage logs can be linked to this content row
+  const newId = crypto.randomUUID();
 
   try {
     // Script step removed — reserved for future audio story subsystem (see memory: project_audio_story_vision)
@@ -442,9 +536,10 @@ export async function generateContentAction(
     const vars = { topic: parsed.data.topic, niche: niche.name, script: "" };
     shortModel = shortTpl?.model ?? MODEL;
     longModel  = longTpl?.model  ?? MODEL;
-
-    const needShort = contentMode === "short" || contentMode === "both";
-    const needLong  = contentMode === "long"  || contentMode === "both";
+    shortPromptTemplateId = shortTpl?.id ?? null;
+    shortPromptTemplateVersion = shortTpl?.version ?? null;
+    longPromptTemplateId = longTpl?.id ?? null;
+    longPromptTemplateVersion = longTpl?.version ?? null;
 
     // Fetch recent topics to inject as dedup context (same as suggestTopicsAction)
     const recentTopics = await getRecentTopicsAction(niche.id, 14);
@@ -453,7 +548,7 @@ export async function generateContentAction(
       : "";
 
     if (needShort) {
-      const shortBasePrompt = applyTemplate(shortTpl?.content ?? DEFAULT_SHORT_PROMPT, vars);
+      const shortBasePrompt = applyTemplate(shortTpl?.content ?? getDefaultShortPrompt(contentProfileKey), vars);
       const shortDraft = await generateShortHooksAndScript({
         client,
         model: shortModel,
@@ -461,12 +556,18 @@ export async function generateContentAction(
         nicheName: niche.name,
         nicheDescription: niche.description,
         tone: niche.tone,
+        contentProfileKey,
         shortBasePrompt,
         dedupBlock,
       });
       shortHookCandidates = shortDraft.hookCandidates;
       shortSelectedHook = shortDraft.selectedHook;
       shortContent = shortDraft.shortContent;
+      hookScoredCandidates = shortDraft.hookScoredCandidates;
+      hookScore = shortDraft.hookScore;
+      hookPattern = shortDraft.hookPattern;
+      hookType = shortDraft.hookType;
+      hookGeneratedAt = new Date();
       shortHookTokens.in = shortDraft.usage.hookIn;
       shortHookTokens.out = shortDraft.usage.hookOut;
       shortPickTokens.in = shortDraft.usage.pickIn;
@@ -484,11 +585,17 @@ export async function generateContentAction(
             nicheName: niche.name,
             nicheDescription: niche.description,
             tone: niche.tone,
+            contentProfileKey,
             dedupBlock,
             count: 20,
         });
         shortHookCandidates = hookEngine.hooks;
         shortSelectedHook = hookEngine.selectedHook;
+        hookScoredCandidates = hookEngine.scoredHooks;
+        hookScore = hookEngine.scoredHooks.find(h => h.hook === hookEngine.selectedHook)?.scores.total ?? null;
+        hookPattern = inferHookPattern(hookEngine.selectedHook);
+        hookType = inferHookType(hookEngine.selectedHook);
+        hookGeneratedAt = new Date();
         shortHookTokens.in += hookEngine.usage.generateIn;
         shortHookTokens.out += hookEngine.usage.generateOut;
         shortPickTokens.in += hookEngine.usage.scoreIn;
@@ -502,6 +609,7 @@ export async function generateContentAction(
         topic: parsed.data.topic,
         nicheName: niche.name,
         selectedHook: shortSelectedHook,
+        contentProfileKey,
         mode: "long",
         longBasePrompt: longBase,
       });
@@ -516,11 +624,11 @@ export async function generateContentAction(
 
     const logJobs: Promise<void>[] = [];
     if (needShort) {
-      logJobs.push(logApiUsage({ model: shortModel, purpose: "content_short", inputTokens: shortHookTokens.in, outputTokens: shortHookTokens.out, nicheId: niche.id }));
-      logJobs.push(logApiUsage({ model: shortModel, purpose: "content_short", inputTokens: shortPickTokens.in, outputTokens: shortPickTokens.out, nicheId: niche.id }));
-      logJobs.push(logApiUsage({ model: shortModel, purpose: "content_short", inputTokens: shortTokens.in, outputTokens: shortTokens.out, nicheId: niche.id }));
+      logJobs.push(logApiUsage({ model: shortModel, purpose: "content_short", inputTokens: shortHookTokens.in, outputTokens: shortHookTokens.out, nicheId: niche.id, contentGenerationId: newId }));
+      logJobs.push(logApiUsage({ model: shortModel, purpose: "content_short", inputTokens: shortPickTokens.in, outputTokens: shortPickTokens.out, nicheId: niche.id, contentGenerationId: newId }));
+      logJobs.push(logApiUsage({ model: shortModel, purpose: "content_short", inputTokens: shortTokens.in, outputTokens: shortTokens.out, nicheId: niche.id, contentGenerationId: newId }));
     }
-    if (needLong)  logJobs.push(logApiUsage({ model: longModel,  purpose: "content_long",  inputTokens: longTokens.in,  outputTokens: longTokens.out,  nicheId: niche.id }));
+    if (needLong)  logJobs.push(logApiUsage({ model: longModel, purpose: "content_long", inputTokens: longTokens.in, outputTokens: longTokens.out, nicheId: niche.id, contentGenerationId: newId }));
     await Promise.all(logJobs);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "LLM error";
@@ -534,23 +642,108 @@ export async function generateContentAction(
     calcCost(shortModel, shortTokens.in, shortTokens.out) +
     calcCost(longModel,  longTokens.in,  longTokens.out);
   const totalTokens = totalInputTokens + totalOutputTokens;
+  const experimentAssignment = getContentExperimentAssignment();
+  const promptVersions = {
+    hook: createPromptVersionEntry("hook", {
+      model: shortModel,
+      stage: "hook_engine",
+      mode: contentMode,
+      details: {
+        count: shortHookCandidates.length,
+        usedForShort: needShort,
+        usedForLong: needLong,
+      },
+    }),
+    script: createPromptVersionEntry("script", {
+      model: needShort && needLong && shortModel !== longModel
+        ? `${shortModel}, ${longModel}`
+        : needLong
+          ? longModel
+          : shortModel,
+      mode: contentMode,
+      details: {
+        short: needShort
+          ? {
+              stage: "short_gen",
+              templateId: shortPromptTemplateId,
+              templateVersion: shortPromptTemplateVersion,
+              model: shortModel,
+            }
+          : null,
+        long: needLong
+          ? {
+              stage: "long_gen",
+              templateId: longPromptTemplateId,
+              templateVersion: longPromptTemplateVersion,
+              model: longModel,
+            }
+          : null,
+      },
+    }),
+    titleMetadata: createPromptVersionEntry("titleMetadata", {
+      model: null,
+      mode: contentMode,
+      details: {
+        source: "deterministic_social_metadata_builder",
+      },
+    }),
+  };
+
+  const resolvedTopicFamily = topicFamily ?? inferStrategicTopicFamily(parsed.data.topic);
+
+  // Voice Rotation V1: pick voice deterministically before INSERT so it goes in atomically.
+  // Only applies to tts_short (voice is irrelevant for legacy_quote_short / long_video).
+  // newId was declared earlier so script/hook usage logs can reference it before INSERT.
+  const rotatedVoice = contentMode !== "long"
+    ? pickVoiceForContent(newId, channelKey)
+    : null;
+
+  console.log(
+    `[generate] topic="${parsed.data.topic}" family="${resolvedTopicFamily}"` +
+    ` (${STRATEGIC_FAMILY_DISPLAY[resolvedTopicFamily as keyof typeof STRATEGIC_FAMILY_DISPLAY] ?? resolvedTopicFamily})` +
+    ` format="${contentMode === "long" ? "long_video" : "tts_short"}" channel="${channelKey}"` +
+    (rotatedVoice ? ` voice=${rotatedVoice}` : ""),
+  );
+
+  if (shortSelectedHook) {
+    console.log(
+      `[HOOK_TRACKING] selected | hookText: "${shortSelectedHook}" | hookType: ${hookType ?? "other"}` +
+      ` | score: ${hookScore ?? "—"} | variant: ${experimentAssignment.experimentVariant}` +
+      ` | contentId: ${newId}`,
+    );
+  }
 
   const [row] = await db
     .insert(contentGenerations)
     .values({
+      id: newId,
       topic: parsed.data.topic,
       nicheId: niche.id,
       nicheName: niche.name,
+      contentProfileKey,
+      channelKey,
       script,
       shortContent,
       shortHookCandidates,
       shortSelectedHook,
+      hookScoredCandidates,
+      hookScore,
+      hookPattern,
+      hookType,
+      hookVariant: experimentAssignment.experimentVariant || null,
+      ...(hookGeneratedAt ? { hookGeneratedAt } : {}),
       longContent,
+      promptVersions,
+      experimentId: experimentAssignment.experimentId,
+      experimentVariant: experimentAssignment.experimentVariant,
       totalTokens,
       totalCost: totalCost.toString(),
       generationTime,
       status: "completed",
       contentMode,
+      formatType: contentMode === "long" ? "long_video" : "tts_short",
+      topicFamily: resolvedTopicFamily,
+      ttsVoice: rotatedVoice,
     })
     .returning({ id: contentGenerations.id });
 
@@ -558,81 +751,20 @@ export async function generateContentAction(
     generationId: row.id,
     topic: parsed.data.topic,
     nicheName: niche.name,
+    contentProfileKey,
+    channelKey,
     script,
     shortContent,
     shortHookCandidates,
     shortSelectedHook: shortSelectedHook || null,
     longContent,
+    promptVersions,
+    experimentId: experimentAssignment.experimentId,
+    experimentVariant: experimentAssignment.experimentVariant,
     totalTokens,
     totalCost,
     generationTime,
   };
-}
-
-/**
- * Generate long video content from an existing short-only item.
- * Uses the short content as a seed so the long video is a coherent expansion.
- */
-export async function expandToLongAction(
-  contentId: string
-): Promise<{ success: true; longContent: string } | { success: false; error: string }> {
-  const item = await db.query.contentGenerations.findFirst({
-    where: eq(contentGenerations.id, contentId),
-  });
-  if (!item) return { success: false, error: "Không tìm thấy content" };
-  if (!item.shortContent) return { success: false, error: "Chưa có short content" };
-
-  const longTpl = await db.query.promptTemplates.findFirst({
-    where: (t, { and: a, eq: e }) =>
-      a(e(t.nicheId, item.nicheId), e(t.stage, "long_gen"), e(t.isActive, true)),
-  });
-
-  const longModel = longTpl?.model ?? MODEL;
-  const vars = { topic: item.topic, niche: item.nicheName, script: "" };
-  const longBase = applyTemplate(longTpl?.content ?? DEFAULT_LONG_PROMPT, vars);
-
-  const client = getOpenRouterClient();
-  try {
-    const selectedHook = item.shortSelectedHook
-      ? item.shortSelectedHook
-      : (await runHookEngine({
-          client,
-          model: longModel,
-          topic: item.topic,
-          nicheName: item.nicheName,
-          dedupBlock: "",
-          count: 20,
-        })).selectedHook;
-
-    const longScript = await runScriptEngine({
-      client,
-      model: longModel,
-      topic: item.topic,
-      nicheName: item.nicheName,
-      selectedHook,
-      mode: "long",
-      longBasePrompt: `${longBase}\n\nShort video teaser đã tạo cho chủ đề này:\n---\n${item.shortContent}\n---`,
-    });
-    if (longScript.mode !== "long") return { success: false, error: "Long script engine returned invalid mode" };
-    const longContent = longScript.result.script;
-    if (!longContent) return { success: false, error: "AI không trả về nội dung" };
-
-    await db.update(contentGenerations)
-      .set({ longContent, contentMode: "both" })
-      .where(eq(contentGenerations.id, contentId));
-
-    await logApiUsage({
-      model: longModel,
-      purpose: "content_long",
-      inputTokens: longScript.usage.inputTokens,
-      outputTokens: longScript.usage.outputTokens,
-      nicheId: item.nicheId,
-    });
-
-    return { success: true, longContent };
-  } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : "LLM error" };
-  }
 }
 
 export async function regenerateShortHooksAction(
@@ -677,7 +809,7 @@ export async function regenerateShortHooksAction(
   });
   const shortModel = shortTpl?.model ?? MODEL;
   const vars = { topic: item.topic, niche: item.nicheName, script: "" };
-  const shortBasePrompt = applyTemplate(shortTpl?.content ?? DEFAULT_SHORT_PROMPT, vars);
+  const shortBasePrompt = applyTemplate(shortTpl?.content ?? getDefaultShortPrompt(item.contentProfileKey), vars);
 
   const recentTopics = await getRecentTopicsAction(item.nicheId, 14);
   const dedupBlock = recentTopics.length > 0
@@ -694,6 +826,7 @@ export async function regenerateShortHooksAction(
       nicheName: item.nicheName,
       nicheDescription: niche.description,
       tone: niche.tone,
+      contentProfileKey: item.contentProfileKey,
       shortBasePrompt,
       dedupBlock,
     });
@@ -712,6 +845,9 @@ export async function regenerateShortHooksAction(
         shortContent: draft.shortContent,
         shortHookCandidates: draft.hookCandidates,
         shortSelectedHook: draft.selectedHook,
+        hookScoredCandidates: draft.hookScoredCandidates,
+        hookScore: draft.hookScore,
+        hookPattern: draft.hookPattern,
         totalTokens: (item.totalTokens ?? 0) + draft.usage.hookIn + draft.usage.hookOut + draft.usage.pickIn + draft.usage.pickOut + draft.usage.shortIn + draft.usage.shortOut,
         totalCost: (Number(item.totalCost) + calcCost(shortModel, draft.usage.hookIn, draft.usage.hookOut) + calcCost(shortModel, draft.usage.pickIn, draft.usage.pickOut) + calcCost(shortModel, draft.usage.shortIn, draft.usage.shortOut)).toString(),
         ttsStatus: "pending",
@@ -735,6 +871,27 @@ export async function regenerateShortHooksAction(
         facebookUploadError: null,
         facebookVideoUrl: null,
         facebookScheduledAt: null,
+        promptVersions: mergePromptVersions(item.promptVersions, {
+          hook: createPromptVersionEntry("hook", {
+            model: shortModel,
+            stage: "hook_engine",
+            mode: "short",
+            details: {
+              count: draft.hookCandidates.length,
+              regenerated: true,
+            },
+          }),
+          script: createPromptVersionEntry("script", {
+            model: shortModel,
+            stage: "short_gen",
+            mode: "short",
+            templateId: shortTpl?.id ?? null,
+            templateVersion: shortTpl?.version ?? null,
+            details: {
+              regeneratedFromHooks: true,
+            },
+          }),
+        }),
         completedAt: null,
         mediaScheduledCleanAt: null,
         mediaCleanedAt: null,
@@ -742,9 +899,9 @@ export async function regenerateShortHooksAction(
       .where(eq(contentGenerations.id, contentId));
 
     await Promise.all([
-      logApiUsage({ model: shortModel, purpose: "content_short", inputTokens: draft.usage.hookIn, outputTokens: draft.usage.hookOut, nicheId: item.nicheId }),
-      logApiUsage({ model: shortModel, purpose: "content_short", inputTokens: draft.usage.pickIn, outputTokens: draft.usage.pickOut, nicheId: item.nicheId }),
-      logApiUsage({ model: shortModel, purpose: "content_short", inputTokens: draft.usage.shortIn, outputTokens: draft.usage.shortOut, nicheId: item.nicheId }),
+      logApiUsage({ model: shortModel, purpose: "content_short", inputTokens: draft.usage.hookIn, outputTokens: draft.usage.hookOut, nicheId: item.nicheId, contentGenerationId: contentId }),
+      logApiUsage({ model: shortModel, purpose: "content_short", inputTokens: draft.usage.pickIn, outputTokens: draft.usage.pickOut, nicheId: item.nicheId, contentGenerationId: contentId }),
+      logApiUsage({ model: shortModel, purpose: "content_short", inputTokens: draft.usage.shortIn, outputTokens: draft.usage.shortOut, nicheId: item.nicheId, contentGenerationId: contentId }),
     ]);
 
     return {
@@ -769,11 +926,16 @@ export async function getContentGenerationAction(
     generationId: row.id,
     topic: row.topic,
     nicheName: row.nicheName,
+    contentProfileKey: row.contentProfileKey,
+    channelKey: row.channelKey,
     script: row.script,
     shortContent: row.shortContent,
     shortHookCandidates: (row.shortHookCandidates as string[]) ?? [],
     shortSelectedHook: row.shortSelectedHook ?? null,
     longContent: row.longContent,
+    promptVersions: row.promptVersions ?? null,
+    experimentId: row.experimentId ?? null,
+    experimentVariant: row.experimentVariant ?? null,
     totalTokens: row.totalTokens ?? 0,
     totalCost: Number(row.totalCost),
     generationTime: row.generationTime ?? 0,
@@ -809,6 +971,7 @@ const FREQUENCY_MINUTES: Record<string, number> = {
   "12hourly":720,
   "daily":   1440,
 };
+const BACKPRESSURE_DELAY_MINUTES = 10;
 
 function calculateNextRunAt(frequency: string): Date {
   const now = new Date();
@@ -831,13 +994,30 @@ function calculateNextRunAt(frequency: string): Date {
   return new Date(now.getTime() + 60 * 60 * 1000);
 }
 
+async function deferSchedulerJobForBackpressure(
+  jobId: string,
+  oldNextRunAt: Date | null,
+): Promise<Date> {
+  const newNextRunAt = new Date(Date.now() + BACKPRESSURE_DELAY_MINUTES * 60_000);
+  await db.update(contentSchedulerJobs)
+    .set({
+      nextRunAt: newNextRunAt,
+      updatedAt: new Date(),
+    })
+    .where(eq(contentSchedulerJobs.id, jobId));
+  console.warn(
+    `[backpressure] rescheduled job ${jobId} oldNextRunAt=${oldNextRunAt?.toISOString() ?? "null"} newNextRunAt=${newNextRunAt.toISOString()}`,
+  );
+  return newNextRunAt;
+}
+
 /**
  * Find the next available YouTube upload slot within [windowStart, windowEnd]
  * spaced intervalMin apart. Tries up to 7 days ahead.
  */
 export async function createSchedulerJobAction(input: {
   nicheId: number;
-  jobType?: "content_gen" | "short_pipeline" | "long_pipeline";
+  jobType?: "content_gen" | "short_pipeline" | "long_pipeline" | "quote_pipeline";
   contentMode?: "short" | "long" | "both";
   batchSize?: number;
   topic: string;
@@ -904,7 +1084,7 @@ export async function updateSchedulerJobAction(
   updates: {
     isEnabled?: boolean;
     nicheId?: number;
-    jobType?: "content_gen" | "short_pipeline" | "long_pipeline";
+    jobType?: "content_gen" | "short_pipeline" | "long_pipeline" | "quote_pipeline";
     contentMode?: "short" | "long" | "both";
     batchSize?: number;
     topic?: string;
@@ -978,7 +1158,7 @@ export async function getSchedulerJobsAction(): Promise<SchedulerJobRecord[]> {
 
   return rows.map(r => ({
     id: r.id,
-    jobType: (r.jobType ?? "content_gen") as "content_gen" | "short_pipeline" | "long_pipeline",
+    jobType: (r.jobType ?? "content_gen") as "content_gen" | "short_pipeline" | "long_pipeline" | "quote_pipeline",
     contentMode: (r.contentMode ?? "both") as "short" | "long" | "both",
     batchSize: r.batchSize ?? 3,
     topic: r.topic,
@@ -1022,26 +1202,53 @@ export async function deleteSchedulerJobAction(
  */
 export async function runSchedulerJobAction(
   jobId: string
-): Promise<{ generationId?: string; topic?: string; processed?: number; results?: object[] } | { error: string }> {
+): Promise<
+  | { generationId?: string; topic?: string; processed?: number; results?: object[] }
+  | { error: string }
+  | { skipped: true; reason: "backpressure"; violations: string[] }
+> {
   const job = await db.query.contentSchedulerJobs.findFirst({
     where: (j, { eq: e }) => e(j.id, jobId),
   });
   if (!job) return { error: "Không tìm thấy job" };
   if (!job.isEnabled) return { error: "Job đã bị tắt" };
 
-  const jobType = (job.jobType ?? "content_gen") as "content_gen" | "short_pipeline" | "long_pipeline";
+  const jobType = (job.jobType ?? "content_gen") as "content_gen" | "short_pipeline" | "long_pipeline" | "quote_pipeline";
 
   // ── Content generation job ──────────────────────────────────
   if (jobType === "content_gen") {
+    const gate = await checkCapacityGate("content_gen");
+    if (!gate.allowed) {
+      await deferSchedulerJobForBackpressure(jobId, job.nextRunAt ?? null);
+      await notifyBackpressureIfNeeded("content_gen", gate.violations).catch(() => {});
+      console.warn(
+        `[backpressure] content_gen blocked for job ${jobId}:`,
+        gate.violations.map((v) => v.message).join("; "),
+      );
+      return { skipped: true, reason: "backpressure", violations: gate.violations.map((v) => v.message) };
+    }
+
     const topicModel  = job.topicModel  ?? "openai/gpt-4o-mini";
     const scriptModel = job.scriptModel ?? undefined;
     const contentMode = (job.contentMode ?? "both") as "short" | "long" | "both";
+
+    // Sprint family selection: pick family first for phat_phap, then suggest a topic within that family.
+    const jobNiche = await db.query.niches.findFirst({
+      where: (n, { eq: e }) => e(n.id, job.nicheId),
+      columns: { channelKey: true },
+    });
+    const sprintFamily = pickBuddhistSprintTopicFamily(jobNiche?.channelKey ?? "");
+    if (sprintFamily) {
+      console.log(
+        `[scheduler:${jobId}] ${sprintAllocationSummary(PHAT_PHAP_SPRINT)} → selected="${sprintFamily}"`,
+      );
+    }
 
     let topic = job.topic.trim();
     if (!topic) {
       let lastError = "";
       for (let attempt = 0; attempt < 3; attempt++) {
-        const suggested = await suggestTopicsAction(job.nicheId, topicModel, 1);
+        const suggested = await suggestTopicsAction(job.nicheId, topicModel, 1, sprintFamily ?? undefined);
         if ("error" in suggested) { lastError = suggested.error; continue; }
         topic = suggested.topics[0] ?? "";
         if (topic) break;
@@ -1049,7 +1256,7 @@ export async function runSchedulerJobAction(
       if (!topic) return { error: `AI không gợi ý được chủ đề sau 3 lần thử${lastError ? `: ${lastError}` : ""}` };
     }
 
-    const result = await generateContentAction(job.nicheId, topic, scriptModel, contentMode);
+    const result = await generateContentAction(job.nicheId, topic, scriptModel, contentMode, sprintFamily ?? undefined);
     if ("error" in result) return { error: result.error };
 
     const nextRunAt = calculateNextRunAt(job.frequency);
@@ -1062,6 +1269,17 @@ export async function runSchedulerJobAction(
 
   // ── Short pipeline job ──────────────────────────────────────
   if (jobType === "short_pipeline") {
+    const gate = await checkCapacityGate("short_pipeline");
+    if (!gate.allowed) {
+      await deferSchedulerJobForBackpressure(jobId, job.nextRunAt ?? null);
+      await notifyBackpressureIfNeeded("short_pipeline", gate.violations).catch(() => {});
+      console.warn(
+        `[backpressure] short_pipeline blocked for job ${jobId}:`,
+        gate.violations.map((v) => v.message).join("; "),
+      );
+      return { skipped: true, reason: "backpressure", violations: gate.violations.map((v) => v.message) };
+    }
+
     const batchSize   = Math.max(job.batchSize ?? 3, getRecommendedShortBatchSize());
     const contentMode = job.contentMode ?? "both";
     const modeFilter  = contentMode === "short" ? ["short"] : contentMode === "long" ? [] : ["short", "both"];
@@ -1115,14 +1333,248 @@ export async function runSchedulerJobAction(
       .set({ lastRunAt: new Date(), nextRunAt, updatedAt: new Date() })
       .where(eq(contentSchedulerJobs.id, jobId));
 
-    // Immediately upload any items just scheduled
-    await processUploadQueueAction().catch(() => {});
+    // Upload queue is cron-driven on purpose so manual/debug job runs cannot
+    // accidentally publish before the scheduled slot.
 
     return { processed: pending.length, results };
   }
 
+  // ── Quote pipeline job ──────────────────────────────────────
+  if (jobType === "quote_pipeline") {
+    const gate = await checkCapacityGate("short_pipeline");
+    if (!gate.allowed) {
+      await deferSchedulerJobForBackpressure(jobId, job.nextRunAt ?? null);
+      await notifyBackpressureIfNeeded("short_pipeline", gate.violations).catch(() => {});
+      console.warn(
+        `[backpressure] quote_pipeline blocked for job ${jobId}:`,
+        gate.violations.map((v) => v.message).join("; "),
+      );
+      return { skipped: true, reason: "backpressure", violations: gate.violations.map((v) => v.message) };
+    }
+
+    const jobNiche = await db.query.niches.findFirst({
+      where: (n, { eq: e }) => e(n.id, job.nicheId),
+      columns: { channelKey: true },
+    });
+    const policy = getYoutubeQuoteSchedulerPolicy(jobNiche?.channelKey);
+    const nextRunAt = calculateNextRunAt(job.frequency);
+
+    if (!policy?.enabled) {
+      await db.update(contentSchedulerJobs)
+        .set({ lastRunAt: new Date(), nextRunAt, updatedAt: new Date() })
+        .where(eq(contentSchedulerJobs.id, jobId));
+      return {
+        processed: 0,
+        results: [{ ok: true, skipped: "unsupported_channel", channelKey: jobNiche?.channelKey ?? null }],
+      };
+    }
+
+    const publishConfig = await getChannelPublishConfig(policy.channelKey);
+    const shortDestination = publishConfig?.shortDestinations.find(
+      (destination) => destination.enabled && destination.channelId > 0,
+    );
+    if (!publishConfig?.autoScheduleEnabled || !shortDestination) {
+      await db.update(contentSchedulerJobs)
+        .set({ lastRunAt: new Date(), nextRunAt, updatedAt: new Date() })
+        .where(eq(contentSchedulerJobs.id, jobId));
+      return {
+        processed: 0,
+        results: [{ ok: true, skipped: "missing_publish_config", channelKey: policy.channelKey }],
+      };
+    }
+
+    const configuredChannel = await db.query.socialChannels.findFirst({
+      where: eq(socialChannels.id, shortDestination.channelId),
+      columns: {
+        id: true,
+        platform: true,
+        platformChannelId: true,
+      },
+    });
+    if (!configuredChannel || configuredChannel.platform !== "youtube") {
+      await db.update(contentSchedulerJobs)
+        .set({ lastRunAt: new Date(), nextRunAt, updatedAt: new Date() })
+        .where(eq(contentSchedulerJobs.id, jobId));
+      return {
+        processed: 0,
+        results: [{ ok: true, skipped: "invalid_youtube_destination", channelId: shortDestination.channelId }],
+      };
+    }
+
+    const siblingChannels = configuredChannel.platformChannelId
+      ? await db.query.socialChannels.findMany({
+          where: (channel, { and: a, eq: e }) => a(
+            e(channel.platform, "youtube"),
+            e(channel.platformChannelId, configuredChannel.platformChannelId!),
+          ),
+          columns: { id: true },
+        })
+      : [{ id: configuredChannel.id }];
+    const siblingChannelIds = siblingChannels.map((channel) => channel.id);
+    const now = new Date();
+    const upcomingRows = await db.select({ id: uploadQueue.id })
+      .from(uploadQueue)
+      .innerJoin(contentGenerations, eq(uploadQueue.contentId, contentGenerations.id))
+      .where(and(
+        inArray(uploadQueue.channelId, siblingChannelIds),
+        inArray(uploadQueue.status, ["queued", "uploading"]),
+        gte(uploadQueue.scheduledAt, now),
+        eq(contentGenerations.formatType, policy.formatType),
+      ));
+    const needed = Math.max(0, policy.targetUpcomingQueueRows - upcomingRows.length);
+    const generateCount = Math.max(
+      0,
+      Math.min(job.batchSize ?? policy.maxQueueInsertPerRun, policy.maxQueueInsertPerRun, needed),
+    );
+
+    if (generateCount === 0) {
+      await db.update(contentSchedulerJobs)
+        .set({ lastRunAt: new Date(), nextRunAt, updatedAt: new Date() })
+        .where(eq(contentSchedulerJobs.id, jobId));
+      return {
+        processed: 0,
+        results: [{
+          ok: true,
+          skipped: "upcoming_queue_target_met",
+          upcomingQueueCount: upcomingRows.length,
+          targetUpcomingQueueRows: policy.targetUpcomingQueueRows,
+        }],
+      };
+    }
+
+    const generated = await generateQuoteShortsAction({
+      count: generateCount,
+      workspaceId: policy.workspaceId,
+      channelProfileId: policy.channelProfileId,
+      durationSec: policy.durationSec,
+    });
+    if (!generated.ok) {
+      return { error: generated.error ?? "Không thể tạo YouTube quote short cho lane mới." };
+    }
+
+    const successfulIds = generated.results
+      .filter((result) => result.ok && result.videoPath)
+      .map((result) => result.contentId);
+    const generatedRows = successfulIds.length > 0
+      ? await db.select({
+          id: contentGenerations.id,
+          topic: contentGenerations.topic,
+          channelKey: contentGenerations.channelKey,
+          nicheId: contentGenerations.nicheId,
+          nicheName: contentGenerations.nicheName,
+          contentProfileKey: contentGenerations.contentProfileKey,
+          formatType: contentGenerations.formatType,
+          shortContent: contentGenerations.shortContent,
+          script: contentGenerations.script,
+          topicFamily: contentGenerations.topicFamily,
+          promptVersions: contentGenerations.promptVersions,
+        })
+        .from(contentGenerations)
+        .where(inArray(contentGenerations.id, successfulIds))
+      : [];
+    const mismatchedGeneratedRows = generatedRows
+      .map((row) => ({
+        row,
+        isolationViolation: getTangSauIsolationViolation({
+          channelKey: row.channelKey,
+          nicheId: row.nicheId,
+          contentProfileKey: row.contentProfileKey,
+          formatType: row.formatType,
+          title: row.topic,
+          topic: row.topic,
+          shortContent: row.shortContent,
+          script: row.script,
+          topicFamily: row.topicFamily,
+          promptVersions: row.promptVersions,
+        }),
+      }))
+      .filter(({ row, isolationViolation }) =>
+        row.channelKey !== policy.channelKey ||
+        row.nicheId !== job.nicheId ||
+        row.contentProfileKey !== "philosophy" ||
+        row.formatType !== policy.formatType ||
+        isolationViolation !== null,
+      );
+    const schedulableIds = new Set(
+      generatedRows
+        .filter((row) => !mismatchedGeneratedRows.some((bad) => bad.row.id === row.id))
+        .map((row) => row.id),
+    );
+    const generatedRowById = new Map(generatedRows.map((row) => [row.id, row]));
+    for (const { row, isolationViolation } of mismatchedGeneratedRows) {
+      console.warn(
+        `[quote_pipeline] skip_schedule_mismatch job=${jobId} contentId=${row.id}` +
+        ` expectedChannel=${policy.channelKey} actualChannel=${row.channelKey}` +
+        ` expectedNicheId=${job.nicheId} actualNicheId=${row.nicheId}` +
+        ` expectedProfile=philosophy actualProfile=${row.contentProfileKey ?? "null"}` +
+        ` expectedFormat=${policy.formatType} actualFormat=${row.formatType ?? "null"}` +
+        (isolationViolation ? ` isolation=${isolationViolation.code}:${isolationViolation.hits.join("|")}` : ""),
+      );
+    }
+    for (const contentId of successfulIds) {
+      if (!schedulableIds.has(contentId)) continue;
+      const generatedRow = generatedRowById.get(contentId);
+      const schedulingTarget = generatedRow
+        ? resolveQuoteSchedulingTarget({
+            channelKey: generatedRow.channelKey,
+            contentProfileKey: generatedRow.contentProfileKey,
+            formatType: generatedRow.formatType,
+          })
+        : null;
+      if (!schedulingTarget) {
+        console.warn(
+          `[quote_pipeline] skip_schedule_target_unresolved job=${jobId} contentId=${contentId}` +
+          ` channel=${generatedRow?.channelKey ?? "null"}` +
+          ` profile=${generatedRow?.contentProfileKey ?? "null"}` +
+          ` format=${generatedRow?.formatType ?? "null"}`,
+        );
+        continue;
+      }
+      await autoScheduleVideoAction(contentId, schedulingTarget).catch(() => {});
+    }
+
+    const scheduledRows = schedulableIds.size > 0
+      ? await db.select({ contentId: uploadQueue.contentId })
+        .from(uploadQueue)
+        .where(and(
+          inArray(uploadQueue.contentId, [...schedulableIds]),
+          inArray(uploadQueue.channelId, siblingChannelIds),
+          eq(uploadQueue.platform, "youtube"),
+          eq(uploadQueue.videoType, "short"),
+          inArray(uploadQueue.status, ["queued", "uploading", "done"]),
+        ))
+      : [];
+
+    await db.update(contentSchedulerJobs)
+      .set({ lastRunAt: new Date(), nextRunAt, updatedAt: new Date() })
+      .where(eq(contentSchedulerJobs.id, jobId));
+
+    return {
+      processed: successfulIds.length,
+      results: [{
+        ok: true,
+        generatedCount: generated.generatedCount,
+        successCount: generated.successCount,
+        mismatchCount: mismatchedGeneratedRows.length,
+        scheduledCount: scheduledRows.length,
+        skippedCount: schedulableIds.size - scheduledRows.length,
+      }],
+    };
+  }
+
   // ── Long pipeline job ───────────────────────────────────────
   if (jobType === "long_pipeline") {
+    const gate = await checkCapacityGate("long_pipeline");
+    if (!gate.allowed) {
+      await deferSchedulerJobForBackpressure(jobId, job.nextRunAt ?? null);
+      await notifyBackpressureIfNeeded("long_pipeline", gate.violations).catch(() => {});
+      console.warn(
+        `[backpressure] long_pipeline blocked for job ${jobId}:`,
+        gate.violations.map((v) => v.message).join("; "),
+      );
+      return { skipped: true, reason: "backpressure", violations: gate.violations.map((v) => v.message) };
+    }
+
     const batchSize   = Math.max(job.batchSize ?? 2, getRecommendedLongBatchSize());
     const contentMode = job.contentMode ?? "both";
     const modeFilter  = contentMode === "long" ? ["long"] : contentMode === "short" ? [] : ["long", "both"];
@@ -1187,8 +1639,8 @@ export async function runSchedulerJobAction(
       .set({ lastRunAt: new Date(), nextRunAt, updatedAt: new Date() })
       .where(eq(contentSchedulerJobs.id, jobId));
 
-    // Immediately upload any items just scheduled
-    await processUploadQueueAction().catch(() => {});
+    // Upload queue is cron-driven on purpose so manual/debug job runs cannot
+    // accidentally publish before the scheduled slot.
 
     return { processed: pending.length, results };
   }
@@ -1198,6 +1650,7 @@ export async function runSchedulerJobAction(
 
 export type GalleryFiltersInput = {
   topic?: string;
+  idSearch?: string;
   nicheId?: number;
   ttsStatus?: string;
   youtubeUploadStatus?: string;
@@ -1220,15 +1673,27 @@ export type PaginatedGenerations = {
 function mapRow(r: typeof contentGenerations.$inferSelect): ContentGenerationRow {
   return {
     id: r.id,
+    formatType: inferFormatType({
+      formatType: r.formatType,
+      experimentId: r.experimentId,
+      contentMode: r.contentMode,
+    }),
     contentMode: r.contentMode ?? "both",
     topic: r.topic,
     nicheName: r.nicheName,
     nicheId: r.nicheId,
+    contentProfileKey: r.contentProfileKey,
+    channelKey: r.channelKey,
     script: r.script,
     shortContent: r.shortContent,
     shortHookCandidates: (r.shortHookCandidates as string[]) ?? [],
     shortSelectedHook: r.shortSelectedHook ?? null,
+    hookPattern: r.hookPattern ?? null,
+    hookType: r.hookType ?? null,
     longContent: r.longContent,
+    promptVersions: r.promptVersions ?? null,
+    experimentId: r.experimentId ?? null,
+    experimentVariant: r.experimentVariant ?? null,
     totalTokens: r.totalTokens ?? 0,
     totalCost: Number(r.totalCost),
     generationTime: r.generationTime ?? 0,
@@ -1250,6 +1715,9 @@ function mapRow(r: typeof contentGenerations.$inferSelect): ContentGenerationRow
     videoStatus: r.videoStatus ?? "pending",
     videoErrorMessage: r.videoErrorMessage,
     videoPath: r.videoPath,
+    shortCoverText: r.shortCoverText ?? null,
+    shortCoverAssetPath: r.shortCoverAssetPath ?? null,
+    shortCoverGeneratedAt: r.shortCoverGeneratedAt ?? null,
     // YouTube (short)
     youtubeUploadStatus: r.youtubeUploadStatus ?? "pending",
     youtubeUploadError: r.youtubeUploadError,
@@ -1295,27 +1763,27 @@ export async function getContentGenerationsAction(
   const page = Math.max(1, filters?.page ?? 1);
   const perPage = Math.min(100, Math.max(1, filters?.perPage ?? 20));
 
-  const isLong = filters?.contentType === "long";
   const conditions = [];
-  // Filter by content_mode so short gallery only shows short/both and long gallery only shows long/both
-  if (filters?.contentType) {
-    conditions.push(isLong
-      ? inArray(contentGenerations.contentMode, ["long", "both"])
-      : inArray(contentGenerations.contentMode, ["short", "both"])
+  const isIdSearch = !!filters?.idSearch;
+  if (filters?.topic) conditions.push(ilike(contentGenerations.topic, `%${filters.topic}%`));
+  if (isIdSearch) {
+    // ID prefix search — matches UUIDs that start with the given prefix (case-insensitive).
+    // Status filters are intentionally skipped so published/error/old items are found.
+    const prefix = filters.idSearch!.toLowerCase().replace(/\s/g, "");
+    conditions.push(ilike(contentGenerations.id, `${prefix}%`));
+  } else {
+    if (filters?.ttsStatus) conditions.push(
+      filters?.contentType === "long"
+        ? eq(contentGenerations.longTtsStatus, filters.ttsStatus)
+        : eq(contentGenerations.ttsStatus, filters.ttsStatus)
+    );
+    if (filters?.youtubeUploadStatus) conditions.push(
+      filters?.contentType === "long"
+        ? eq(contentGenerations.longYoutubeUploadStatus, filters.youtubeUploadStatus)
+        : eq(contentGenerations.youtubeUploadStatus, filters.youtubeUploadStatus)
     );
   }
-  if (filters?.topic) conditions.push(ilike(contentGenerations.topic, `%${filters.topic}%`));
   if (filters?.nicheId) conditions.push(eq(contentGenerations.nicheId, filters.nicheId));
-  if (filters?.ttsStatus) conditions.push(
-    isLong
-      ? eq(contentGenerations.longTtsStatus, filters.ttsStatus)
-      : eq(contentGenerations.ttsStatus, filters.ttsStatus)
-  );
-  if (filters?.youtubeUploadStatus) conditions.push(
-    isLong
-      ? eq(contentGenerations.longYoutubeUploadStatus, filters.youtubeUploadStatus)
-      : eq(contentGenerations.youtubeUploadStatus, filters.youtubeUploadStatus)
-  );
   if (filters?.isLocked !== undefined) conditions.push(eq(contentGenerations.isLocked, filters.isLocked));
 
   const where = conditions.length > 0 ? and(...conditions) : undefined;
@@ -1327,25 +1795,33 @@ export async function getContentGenerationsAction(
     newest: desc(contentGenerations.createdAt),
   }[filters?.sortBy ?? "newest"] ?? desc(contentGenerations.createdAt);
 
-  const [{ total }] = await db
-    .select({ total: count() })
-    .from(contentGenerations)
-    .where(where);
-
   const rows = await db
     .select()
     .from(contentGenerations)
     .where(where)
     .orderBy(orderCol)
-    .limit(perPage)
-    .offset((page - 1) * perPage);
+  ;
+
+  const mappedRows = rows.map(mapRow);
+  const filteredRows = mappedRows.filter((row) => {
+    if (filters?.contentType === "long") {
+      return isLongVideoContent(row);
+    }
+    if (filters?.contentType === "short") {
+      return isTtsShortContent(row);
+    }
+    return true;
+  });
+
+  const total = filteredRows.length;
+  const items = filteredRows.slice((page - 1) * perPage, page * perPage);
 
   return {
-    items: rows.map(mapRow),
-    total: Number(total),
+    items,
+    total,
     page,
     perPage,
-    hasNextPage: page * perPage < Number(total),
+    hasNextPage: page * perPage < total,
     hasPrevPage: page > 1,
   };
 }

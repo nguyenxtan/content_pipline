@@ -38,6 +38,20 @@ function Section({ title, content }: { title: string; content: string }) {
   );
 }
 
+function StatusRow({ label, value, tone }: { label: string; value: string; tone?: "ok" | "warn" | "neutral" }) {
+  const color = tone === "ok"
+    ? "text-emerald-300"
+    : tone === "warn"
+      ? "text-amber-300"
+      : "text-gray-300";
+  return (
+    <div className="flex items-center justify-between rounded-lg bg-gray-800 px-3 py-2 text-xs">
+      <span className="text-gray-400">{label}</span>
+      <span className={color}>{value}</span>
+    </div>
+  );
+}
+
 export function ViewGenerationModal({ generation, onClose }: Props) {
   const hooksText = generation.shortHookCandidates?.length
     ? generation.shortHookCandidates.map((hook: string, index: number) => `${index + 1}. ${hook}`).join("\n")
@@ -60,6 +74,26 @@ export function ViewGenerationModal({ generation, onClose }: Props) {
           <button onClick={onClose} className="text-gray-400 hover:text-gray-200 text-2xl leading-none ml-4">×</button>
         </div>
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          <div className="grid gap-2 sm:grid-cols-3">
+            <StatusRow
+              label="CoverText"
+              value={generation.shortCoverText ? "Có" : "Thiếu"}
+              tone={generation.shortCoverText ? "ok" : "warn"}
+            />
+            <StatusRow
+              label="Cover Asset"
+              value={generation.shortCoverAssetPath ? "Có" : "Thiếu"}
+              tone={generation.shortCoverAssetPath ? "ok" : "warn"}
+            />
+            <StatusRow
+              label="Hook Pattern"
+              value={generation.hookPattern ?? generation.hookType ?? "Thiếu"}
+              tone={generation.hookPattern || generation.hookType ? "ok" : "warn"}
+            />
+          </div>
+          {generation.shortCoverText && (
+            <Section title="🖼️ Cover Text" content={generation.shortCoverText} />
+          )}
           <Section title="📄 Script / Kịch bản" content={generation.script} />
           {generation.shortSelectedHook && (
             <Section title="🎣 Hook đã chọn" content={generation.shortSelectedHook} />

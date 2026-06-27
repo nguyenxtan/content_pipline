@@ -658,11 +658,21 @@ interface Props {
   initialReady: ReadyVideoRow[];
 }
 
+type ShortFormatFilter = "all" | "tts_short" | "legacy_quote";
+
+function isLegacyQuoteShort(item: UploadQueueRow): boolean {
+  return item.videoType === "short" && (
+    item.contentExperimentId === "LEGACY_QUOTE_SHORT" ||
+    item.contentId.startsWith("legacy-quote-v2-sample-")
+  );
+}
+
 export function ScheduleClient({ initialItems, initialReady }: Props) {
   const [items,    setItems]    = useState<UploadQueueRow[]>(initialItems);
   const [ready,    setReady]    = useState<ReadyVideoRow[]>(initialReady);
   const [channels, setChannels] = useState<SocialChannel[]>([]);
   const [loading,  setLoading]  = useState(false);
+  const [shortFormatFilter, setShortFormatFilter] = useState<ShortFormatFilter>("all");
 
   useEffect(() => {
     getChannelsAction().then(chs => setChannels(chs.filter(c => c.isActive && !c.needsReconnect)));
@@ -710,8 +720,17 @@ export function ScheduleClient({ initialItems, initialReady }: Props) {
     return () => clearInterval(t);
   }, [items, reload]);
 
+  const visibleItems = React.useMemo(() => {
+    if (shortFormatFilter === "all") return items;
+    return items.filter((item) => {
+      if (item.videoType !== "short") return false;
+      const isLegacy = isLegacyQuoteShort(item);
+      return shortFormatFilter === "legacy_quote" ? isLegacy : !isLegacy;
+    });
+  }, [items, shortFormatFilter]);
+
   // Group by channel
-  const byChannel = items.reduce((acc, item) => {
+  const byChannel = visibleItems.reduce((acc, item) => {
     const k = String(item.platformAccountId ?? item.channelId);
     if (!acc[k]) {
       const platformLabel = item.platform === "facebook" ? "Facebook" : "YouTube";
@@ -723,14 +742,14 @@ export function ScheduleClient({ initialItems, initialReady }: Props) {
     return acc;
   }, {} as Record<string, { label: string; short: UploadQueueRow[]; quote: UploadQueueRow[]; long: UploadQueueRow[] }>);
 
-  const totalQueued    = items.filter(i => i.status === "queued").length;
-  const totalUploading = items.filter(i => i.status === "uploading").length;
-  const totalError     = items.filter(i => i.status === "error").length;
+  const totalQueued    = visibleItems.filter(i => i.status === "queued").length;
+  const totalUploading = visibleItems.filter(i => i.status === "uploading").length;
+  const totalError     = visibleItems.filter(i => i.status === "error").length;
   const facebookNeedsReconnect = channels.some((c) => c.platform === "facebook" && c.needsReconnect);
-  const nextItem = items
+  const nextItem = visibleItems
     .filter((item) => item.status === "queued" || item.status === "uploading")
     .sort((a, b) => a.scheduledAt.getTime() - b.scheduledAt.getTime())[0];
-  const activeAccounts = new Set(items.map((item) => `${item.platform}:${item.platformAccountId ?? item.channelId}`)).size;
+  const activeAccounts = new Set(visibleItems.map((item) => `${item.platform}:${item.platformAccountId ?? item.channelId}`)).size;
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 space-y-6">
@@ -812,6 +831,26 @@ export function ScheduleClient({ initialItems, initialReady }: Props) {
             <p className="mt-1 text-xs text-slate-500">
               Mỗi card là một kênh thật. Bên trong tách rõ Short, Bài ảnh và Long để bạn nhìn nhanh slot nào đang chờ, đang đăng hoặc lỗi.
             </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {([
+                { value: "all", label: "Tất cả" },
+                { value: "tts_short", label: "TTS Short" },
+                { value: "legacy_quote", label: "Legacy Quote" },
+              ] as const).map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => setShortFormatFilter(option.value)}
+                  className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                    shortFormatFilter === option.value
+                      ? "border-rose-700/50 bg-rose-950/20 text-rose-300"
+                      : "border-slate-700 bg-slate-900 text-slate-400 hover:border-slate-500 hover:text-slate-200"
+                  }`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
           </div>
 
           {Object.keys(byChannel).length === 0 ? (

@@ -5,10 +5,23 @@ import { getContentGenerationsAction } from "@/actions/content-generator";
 
 export const dynamic = "force-dynamic";
 
-export default async function GalleryPage() {
+interface PageProps {
+  searchParams: Promise<{ q?: string }>;
+}
+
+export default async function GalleryPage({ searchParams }: PageProps) {
+  const { q } = await searchParams;
+  const isId = !!q && q.length >= 7 && /^[0-9a-f-]+$/i.test(q);
+
   const [niches, initialData] = await Promise.all([
     getNiches(),
-    getContentGenerationsAction({ page: 1, perPage: 30, sortBy: "newest", contentType: "short" }),
+    getContentGenerationsAction({
+      page: 1,
+      perPage: 30,
+      sortBy: "newest",
+      contentType: "short",
+      ...(q ? (isId ? { idSearch: q } : { topic: q }) : {}),
+    }),
   ]);
 
   return (
@@ -28,7 +41,7 @@ export default async function GalleryPage() {
             + Tạo mới
           </a>
         </div>
-        <ContentGallery niches={niches} initialData={initialData} initialTab="short" />
+        <ContentGallery niches={niches} initialData={initialData} initialTab="short" initialSearch={q} />
       </div>
     </AppShell>
   );

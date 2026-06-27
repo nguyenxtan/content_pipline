@@ -10,6 +10,8 @@ import {
   syncFacebookAnalyticsAction,
   syncYouTubeAnalyticsAction,
 } from "@/actions/publishing-analytics";
+import { maybeSendFactoryHealthSummaryAction } from "@/actions/factory-health";
+import { runAutoRefillWatcher } from "@/lib/auto-refill-watcher";
 import { sendTelegram } from "@/lib/social/telegram";
 
 const CRON_HEALTH_CONFIG_KEY = "cron_health_state";
@@ -78,6 +80,7 @@ export async function POST(req: NextRequest) {
   }
 
   const start = Date.now();
+  const cronRunId = crypto.randomUUID();
   const body = await req.json().catch(() => ({})) as { jobId?: string };
 
   // ── Manual trigger for a single job ─────────────────────────
@@ -152,10 +155,18 @@ export async function POST(req: NextRequest) {
   const errors: string[] = [];
   let dueJobs: ContentSchedulerJob[] = [];
   let uploadResult: Awaited<ReturnType<typeof processUploadQueueAction>> = { processed: 0, results: [] };
+  let autoRefillResult:
+    | Awaited<ReturnType<typeof runAutoRefillWatcher>>
+    | null = null;
 
   try {
     try {
-      uploadResult = await processUploadQueueAction();
+      uploadResult = await processUploadQueueAction({
+        source: "cron",
+        allowUpload: true,
+        runId: cronRunId,
+        job: "api/cron/run",
+      });
       const uploadErrors = uploadResult.results
         .filter((r) => !r.ok && !NON_FATAL_UPLOAD_ERRORS.has(r.error ?? ""))
         .map((r) => `[upload] ${r.error ?? "unknown error"}`);
@@ -175,8 +186,22 @@ export async function POST(req: NextRequest) {
         const res = await runSchedulerJobAction(job.id);
         const entry = { jobId: job.id, jobType: job.jobType, nicheName: job.nicheName, ...res };
         results.push(entry);
+
         if ("error" in res) {
+          // Top-level job failure (e.g. job not found, disabled)
           errors.push(`[${job.jobType}/${job.nicheName}] ${res.error}`);
+        } else if ("results" in res && Array.isArray(res.results)) {
+          // Per-item pipeline failures inside short_pipeline / long_pipeline jobs.
+          // runSchedulerJobAction returns { processed, results: [{ok, step, error, id}] }
+          // which does NOT reach the outer "error" branch — so we inspect results here.
+          for (const r of res.results) {
+            const item = r as { ok?: boolean; error?: string; step?: string; id?: string };
+            if (!item.ok && item.error) {
+              errors.push(
+                `[${job.nicheName}/${item.step ?? "pipeline"}] ${item.id ? `(${item.id.slice(0, 8)}) ` : ""}${item.error}`,
+              );
+            }
+          }
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -196,6 +221,14 @@ export async function POST(req: NextRequest) {
     await syncYouTubeAnalyticsAction({ limitVideos: 20 }).catch(() => {});
     await syncFacebookAnalyticsAction({ limitVideos: 20 }).catch(() => {});
     await maybeSendScheduledAnalyticsReportAction().catch(() => {});
+    await maybeSendFactoryHealthSummaryAction().catch(() => {});
+
+    try {
+      autoRefillResult = await runAutoRefillWatcher({ dryRun: false, source: "cron" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`[auto-refill] ${message}`);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     errors.push(`[cron] ${message}`);
@@ -215,9 +248,11 @@ export async function POST(req: NextRequest) {
   // ── Log this run ─────────────────────────────────────────────
   const durationMs = Date.now() - start;
   await db.insert(cronRunLogs).values({
-    id: crypto.randomUUID(),
+    id: cronRunId,
     jobsRan: dueJobs.length,
-    jobsResults: results,
+    jobsResults: autoRefillResult
+      ? [...results, { autoRefill: autoRefillResult }]
+      : results,
     uploadsProcessed: uploadResult.processed,
     hasErrors: errors.length > 0,
     errorSummary: errors.length > 0 ? errors.slice(0, 3).join(" | ") : null,
@@ -236,6 +271,7 @@ export async function POST(req: NextRequest) {
     ran: dueJobs.length,
     results,
     uploads: { processed: uploadResult.processed, results: uploadResult.results },
+    autoRefill: autoRefillResult,
     errors,
     durationMs,
   });

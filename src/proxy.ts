@@ -1,7 +1,26 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 const COOKIE_NAME = "cp_session";
-const PUBLIC_PATHS = ["/login", "/api/cron"];
+const PUBLIC_PATHS = [
+  "/login",
+  "/api/cron",
+  "/api/admin",
+  "/api/telegram",
+  // Audio streams — served from protected admin pages; <audio> elements don't reliably
+  // forward session cookies in all browsers, causing 307→HTML → silent playback failure.
+  // Access is gated by opaque asset UUID (story-audio-assets) or content-UUID (tts/stream),
+  // not guessable paths. Admin UI access already requires auth.
+  "/api/tts/stream",
+  "/api/story-audio-assets",
+  // Local-only file-based artifact preview (F4.38.6) — scoped strictly to
+  // media/story-audio/ with path-traversal and extension allowlisting in
+  // the route itself; not a generic file server. Admin UI access already
+  // requires auth, same rationale as the entries above.
+  "/api/story-audio-local",
+  // Local-only render-preview video (F4.38.6+) — same model, scoped to
+  // media/story-renders/ and .mp4 only.
+  "/api/story-render-local",
+];
 
 // Use Web Crypto API (Edge Runtime compatible)
 async function verifyToken(token: string): Promise<boolean> {

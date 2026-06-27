@@ -28,6 +28,24 @@ export default function LoginPage() {
         <form action={action} className="space-y-4">
           <div className="space-y-1">
             <label
+              htmlFor="username"
+              className="text-sm font-medium text-slate-100"
+            >
+              Tên đăng nhập
+            </label>
+            <input
+              id="username"
+              name="username"
+              type="text"
+              required
+              autoFocus
+              autoComplete="username"
+              className="w-full rounded-md border border-slate-600 bg-transparent px-3 py-2 text-sm text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-rose-500"
+              placeholder="admin"
+            />
+          </div>
+          <div className="space-y-1">
+            <label
               htmlFor="password"
               className="text-sm font-medium text-slate-100"
             >
@@ -38,7 +56,7 @@ export default function LoginPage() {
               name="password"
               type="password"
               required
-              autoFocus
+              autoComplete="current-password"
               className="w-full rounded-md border border-slate-600 bg-transparent px-3 py-2 text-sm text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-rose-500"
               placeholder="••••••••"
             />

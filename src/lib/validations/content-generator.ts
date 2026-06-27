@@ -1,4 +1,6 @@
 import { z } from "zod";
+import type { PromptVersionSnapshot } from "@/lib/prompt-version-registry";
+import type { ContentFormatType } from "@/lib/content-format-type";
 
 export const generateContentSchema = z.object({
   nicheId: z.number().int().positive(),
@@ -9,7 +11,7 @@ export type GenerateContentInput = z.infer<typeof generateContentSchema>;
 
 export const schedulerJobSchema = z.object({
   nicheId: z.number().int().positive(),
-  jobType: z.enum(["content_gen", "short_pipeline", "long_pipeline"]).default("content_gen"),
+  jobType: z.enum(["content_gen", "short_pipeline", "long_pipeline", "quote_pipeline"]).default("content_gen"),
   contentMode: z.enum(["short", "long", "both"]).default("both"),
   batchSize: z.number().int().min(1).max(20).default(3),
   topic: z.string().max(200).default(""),
@@ -38,11 +40,18 @@ export type GeneratedContentResult = {
   generationId: string;
   topic: string;
   nicheName: string;
+  contentProfileKey: string;
+  channelKey: string;
   script: string;
   shortContent: string;
   shortHookCandidates: string[];
   shortSelectedHook: string | null;
+  hookPattern: string | null;
+  hookType: string | null;
   longContent: string;
+  promptVersions: PromptVersionSnapshot | null;
+  experimentId: string | null;
+  experimentVariant: string | null;
   totalTokens: number;
   totalCost: number;
   generationTime: number;
@@ -62,15 +71,21 @@ export type UpdateContentStatusInput = z.infer<typeof updateContentStatusSchema>
 
 export type ContentGenerationRow = {
   id: string;
+  formatType: ContentFormatType;
   contentMode: string;
   topic: string;
   nicheName: string;
   nicheId: number;
+  contentProfileKey: string;
+  channelKey: string;
   script: string;
   shortContent: string;
   shortHookCandidates: string[];
   shortSelectedHook: string | null;
   longContent: string;
+  promptVersions: PromptVersionSnapshot | null;
+  experimentId: string | null;
+  experimentVariant: string | null;
   totalTokens: number;
   totalCost: number;
   generationTime: number;
@@ -90,6 +105,9 @@ export type ContentGenerationRow = {
   videoStatus: string | null;
   videoErrorMessage: string | null;
   videoPath: string | null;
+  shortCoverText: string | null;
+  shortCoverAssetPath: string | null;
+  shortCoverGeneratedAt: Date | null;
   // Long pipeline
   longTtsStatus: string | null;
   longTtsErrorMessage: string | null;
@@ -130,7 +148,7 @@ export type ContentGenerationRow = {
 
 export type SchedulerJobRecord = {
   id: string;
-  jobType: "content_gen" | "short_pipeline" | "long_pipeline";
+  jobType: "content_gen" | "short_pipeline" | "long_pipeline" | "quote_pipeline";
   contentMode: "short" | "long" | "both";
   batchSize: number;
   topic: string;

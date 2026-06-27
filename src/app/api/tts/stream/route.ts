@@ -13,12 +13,21 @@ const AUDIO_DIR = path.join(process.cwd(), "media", "audio");
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const file = searchParams.get("file");
+  const relPath = searchParams.get("path");
 
-  if (!file) return NextResponse.json({ error: "file required" }, { status: 400 });
+  if (!file && !relPath) return NextResponse.json({ error: "file required" }, { status: 400 });
 
-  // Chặn path traversal
-  const safeName = path.basename(file);
-  const filePath = path.join(AUDIO_DIR, safeName);
+  const requestedPath = relPath
+    ? path
+        .normalize(relPath)
+        .replace(/^([/\\])+/, "")
+        .replace(/^(\.\.(\/|\\|$))+/, "")
+    : path.basename(file as string);
+  const filePath = path.join(AUDIO_DIR, requestedPath);
+
+  if (!filePath.startsWith(AUDIO_DIR)) {
+    return NextResponse.json({ error: "Invalid path" }, { status: 400 });
+  }
 
   if (!fs.existsSync(filePath)) {
     return NextResponse.json({ error: "File không tồn tại" }, { status: 404 });
@@ -26,7 +35,7 @@ export async function GET(req: Request) {
 
   const fileBuffer = fs.readFileSync(filePath);
   const fileSize = fileBuffer.length;
-  const ext = path.extname(safeName).toLowerCase();
+  const ext = path.extname(filePath).toLowerCase();
   const contentType = ext === ".mp3" ? "audio/mpeg" : "audio/wav";
   const rangeHeader = req.headers.get("range");
 
@@ -44,7 +53,7 @@ export async function GET(req: Request) {
         "Accept-Ranges": "bytes",
         "Content-Length": String(chunkSize),
         "Content-Type": contentType,
-        "Cache-Control": "public, max-age=3600",
+        "Cache-Control": "no-cache",
       },
     });
   }
@@ -55,7 +64,7 @@ export async function GET(req: Request) {
       "Content-Type": contentType,
       "Content-Length": String(fileSize),
       "Accept-Ranges": "bytes",
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "no-cache",
     },
   });
 }

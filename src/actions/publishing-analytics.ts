@@ -3,6 +3,7 @@
 import { db } from "@/lib/db";
 import {
   appConfig,
+  contentGenerations,
   platformAccounts,
   publishedVideos,
   socialChannels,
@@ -16,6 +17,7 @@ import {
   isNotNull,
 } from "drizzle-orm";
 import {
+  fetchYouTubeAnalyticsMetrics,
   isAuthError,
   isQuotaExceededError,
   isTokenRevokedError,
@@ -24,6 +26,16 @@ import {
   nextQuotaResetUtc,
 } from "@/lib/social/youtube-api";
 import { sendTelegram } from "@/lib/social/telegram";
+import { getContentProfile } from "@/lib/config/content-profiles";
+import {
+  STRATEGIC_FAMILY_DISPLAY,
+  type StrategicTopicFamilyId,
+  inferStrategicTopicFamily,
+  normalizeTopicFamily,
+  NEEDS_REVIEW_FAMILY,
+} from "@/lib/config/topic-family-registry";
+import { PHAT_PHAP_SPRINT } from "@/lib/config/sprint-config";
+import { HOOK_TYPE_DISPLAY, type HookType } from "@/lib/hook-engine";
 
 const SUPPORTED_PLATFORMS = ["youtube", "facebook", "tiktok"] as const;
 type SupportedPlatform = (typeof SUPPORTED_PLATFORMS)[number];
@@ -115,6 +127,78 @@ export type PublishingAnalyticsPayload = {
   };
 };
 
+export type TopicPerformanceRow = {
+  topic: string;
+  niche: string | null;
+  contentProfileKey: string | null;
+  videoCount: number;
+  avgViews: number;
+  avgViewDurationSec: number | null;
+  avgRetentionPct: number | null;
+  lastPublishedAt: Date | null;
+};
+
+export type TopicPerformanceSummary = {
+  highPerformers: TopicPerformanceRow[];
+  mediumPerformers: TopicPerformanceRow[];
+  lowPerformers: TopicPerformanceRow[];
+  topKeywords: string[];
+  weakKeywords: string[];
+  observations: string[];
+};
+
+export type HookPerformanceRow = {
+  hookText: string;
+  hookPattern: string | null;
+  hookType: string | null;
+  topic: string | null;
+  niche: string | null;
+  videoCount: number;
+  avgViews: number;
+  avgViewDurationSec: number | null;
+  avgRetentionPct: number | null;
+  lastPublishedAt: Date | null;
+  lowConfidence: boolean;
+};
+
+export type HookTypePerformanceRow = {
+  hookType: string;
+  displayName: string;
+  videoCount: number;
+  avgViews: number;
+  avgViewDurationSec: number | null;
+  avgRetentionPct: number | null;
+  lowConfidence: boolean;
+};
+
+export type TopicCoverageClusterRow = {
+  clusterName: string;
+  videoCount: number;
+  avgViews: number;
+  avgRetentionPct: number | null;
+  avgWatchDurationSec: number | null;
+  topicCount: number;
+  topics: string[];
+};
+
+export type StrategicFamilyWindow = {
+  total: number;
+  last3d: number;
+  last7d: number;
+  last30d: number;
+};
+
+export type StrategicFamilyCoverageRow = {
+  familyId: string;
+  displayName: string;
+  sprintLabel: "Focus" | "Secondary" | "Explore" | "Low priority" | "Needs review" | null;
+  sampleDepth: StrategicFamilyWindow;
+  videoCount: StrategicFamilyWindow;
+  quoteCount: StrategicFamilyWindow;
+  sampleDepthStatus: string;
+  topics: string[];
+};
+
 export type SyncAnalyticsResult = {
   platform: SupportedPlatform;
   accountsTouched: number;
@@ -157,6 +241,83 @@ function toCount(value: number | string | null | undefined): number {
   const num = typeof value === "number" ? value : Number(value);
   return Number.isFinite(num) ? num : 0;
 }
+
+function toRetentionPctDbValue(value: number | null): string | null {
+  if (value === null || !Number.isFinite(value)) return null;
+  // DB column is numeric(5,2). Very short videos can report extreme replay
+  // percentages, so cap rather than failing the whole analytics sync.
+  return String(Math.min(999.99, Math.max(0, value)));
+}
+
+const TOPIC_STOPWORDS = new Set([
+  "bi",
+  "biết",
+  "bí",
+  "bình",
+  "bí ẩn",
+  "bước",
+  "cách",
+  "cảm",
+  "chiêm",
+  "chuyện",
+  "con",
+  "con đường",
+  "của",
+  "cuộc",
+  "đau",
+  "đến",
+  "điều",
+  "đời",
+  "định",
+  "đó",
+  "được",
+  "giải",
+  "gì",
+  "giữa",
+  "giúp",
+  "hành",
+  "học",
+  "hiểu",
+  "hơn",
+  "hướng",
+  "khám",
+  "khỏi",
+  "khi",
+  "không",
+  "là",
+  "lời",
+  "lực",
+  "mỗi",
+  "một",
+  "ngày",
+  "nghệ",
+  "người",
+  "nhẹ",
+  "những",
+  "phá",
+  "phần",
+  "qua",
+  "quyết",
+  "ra",
+  "sự",
+  "sống",
+  "sức",
+  "sức mạnh",
+  "tâm",
+  "theo",
+  "thế",
+  "thức",
+  "thuật",
+  "trải",
+  "trong",
+  "từ",
+  "và",
+  "về",
+  "với",
+]);
+
+const EMOTIONAL_ANGLE_RULES = getContentProfile("buddhism").analyticsEmotionalAngleRules;
+const TOPIC_CLUSTER_RULES = getContentProfile("buddhism").analyticsTopicClusterRules;
 
 function parseIsoDurationToSeconds(input?: string | null): number | null {
   if (!input) return null;
@@ -222,6 +383,67 @@ function getLocalDateParts(now: Date) {
     minute: Number(get("minute")),
     isoDate: `${get("year")}-${get("month")}-${get("day")}`,
   };
+}
+
+function percentileRank(values: number[], target: number | null): number | null {
+  if (target == null || values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const lessOrEqual = sorted.filter((value) => value <= target).length;
+  return Number((lessOrEqual / sorted.length).toFixed(4));
+}
+
+function averageNumbers(values: Array<number | null>): number | null {
+  const usable = values.filter((value): value is number => value != null && Number.isFinite(value));
+  if (usable.length === 0) return null;
+  return usable.reduce((sum, value) => sum + value, 0) / usable.length;
+}
+
+function normalizeTopicWords(topic: string): string[] {
+  return topic
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter((word) => word.length >= 2)
+    .filter((word) => !TOPIC_STOPWORDS.has(word));
+}
+
+function collectKeywordCounts(rows: TopicPerformanceRow[]): Array<[string, number]> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    for (const word of normalizeTopicWords(row.topic)) {
+      counts.set(word, (counts.get(word) ?? 0) + 1);
+    }
+  }
+  return Array.from(counts.entries()).sort((a, b) => {
+    if (b[1] !== a[1]) return b[1] - a[1];
+    return a[0].localeCompare(b[0], "vi");
+  });
+}
+
+function detectRecurringAngles(rows: TopicPerformanceRow[]): string[] {
+  const labels: string[] = [];
+  const topicBlob = rows.map((row) => row.topic.toLowerCase()).join(" || ");
+  const rules = rows.length > 0
+    ? getContentProfile(rows[0].contentProfileKey).analyticsEmotionalAngleRules
+    : EMOTIONAL_ANGLE_RULES;
+  for (const rule of rules) {
+    if (rule.keywords.some((keyword) => topicBlob.includes(keyword))) {
+      labels.push(rule.label);
+    }
+  }
+  return labels;
+}
+
+function resolveTopicClusterName(topic: string, contentProfileKey?: string | null): string {
+  const normalized = topic.toLowerCase();
+  const rules = getContentProfile(contentProfileKey).analyticsTopicClusterRules;
+  for (const rule of rules) {
+    if (rule.keywords.some((keyword) => normalized.includes(keyword))) {
+      return rule.label;
+    }
+  }
+  return "Khác / chưa phân cụm";
 }
 
 function getReportWindow(period: AnalyticsReportPeriod, now: Date) {
@@ -531,15 +753,21 @@ async function listFacebookReels(
   return Array.isArray(json.data) ? json.data as FacebookReelMetricItem[] : [];
 }
 
+type WriteYouTubeMetricsResult = {
+  updated: number;
+  fetchedAt: Date;
+  snapshotKeys: Array<{ platformVideoId: string; publishedVideoId: string }>;
+};
+
 async function writeYouTubeMetrics(
   accountId: number,
   credentialChannelId: number,
   items: Awaited<ReturnType<typeof listYouTubeVideos>>,
-): Promise<number> {
+): Promise<WriteYouTubeMetricsResult> {
   const videoIds = items
     .map((item) => item.id)
     .filter((value): value is string => !!value);
-  if (videoIds.length === 0) return 0;
+  if (videoIds.length === 0) return { updated: 0, fetchedAt: new Date(), snapshotKeys: [] };
 
   const existing = await db.query.publishedVideos.findMany({
     where: and(
@@ -550,7 +778,10 @@ async function writeYouTubeMetrics(
   });
   const byVideoId = new Map(existing.map((row) => [row.platformVideoId, row]));
 
+  const now = new Date();
   let updated = 0;
+  const snapshotKeys: Array<{ platformVideoId: string; publishedVideoId: string }> = [];
+
   for (const item of items) {
     if (!item.id) continue;
     const row = byVideoId.get(item.id);
@@ -565,7 +796,6 @@ async function writeYouTubeMetrics(
     const publishedAt = item.snippet?.publishedAt
       ? new Date(item.snippet.publishedAt)
       : row.publishedAt;
-    const now = new Date();
 
     await db
       .update(publishedVideos)
@@ -598,6 +828,7 @@ async function writeYouTubeMetrics(
       rawJson: item,
     });
 
+    snapshotKeys.push({ platformVideoId: item.id, publishedVideoId: row.id });
     updated++;
   }
 
@@ -606,7 +837,7 @@ async function writeYouTubeMetrics(
     .set({ lastSyncedAt: new Date(), updatedAt: new Date() })
     .where(eq(platformAccounts.id, accountId));
 
-  return updated;
+  return { updated, fetchedAt: now, snapshotKeys };
 }
 
 async function writeFacebookMetrics(
@@ -731,9 +962,53 @@ export async function syncYouTubeAnalyticsAction(input?: {
     for (const credential of candidates) {
       try {
         const items = await listYouTubeVideos(credential.id, videoIds);
-        result.videosUpdated += await writeYouTubeMetrics(accountId, credential.id, items);
+        const writeResult = await writeYouTubeMetrics(accountId, credential.id, items);
+        result.videosUpdated += writeResult.updated;
         result.accountsTouched++;
         synced = true;
+
+        // YouTube Analytics API: fetch CTR + retention for the just-written snapshots
+        if (writeResult.snapshotKeys.length > 0) {
+          try {
+            const endDate   = writeResult.fetchedAt.toISOString().slice(0, 10);
+            const startDate = new Date(writeResult.fetchedAt.getTime() - 90 * 24 * 60 * 60 * 1000)
+              .toISOString().slice(0, 10);
+            const platformVideoIds = writeResult.snapshotKeys.map((k) => k.platformVideoId);
+
+            const analyticsMap = await fetchYouTubeAnalyticsMetrics(
+              credential.id,
+              platformVideoIds,
+              startDate,
+              endDate,
+            );
+
+            for (const { platformVideoId, publishedVideoId } of writeResult.snapshotKeys) {
+              const metrics = analyticsMap.get(platformVideoId);
+              if (!metrics) continue;
+              await db
+                .update(videoMetricSnapshots)
+                .set({
+                  ctr:                     metrics.ctr !== null ? String(metrics.ctr) : null,
+                  avgViewDurationSec:      metrics.avgViewDurationSec,
+                  retentionPct:            toRetentionPctDbValue(metrics.retentionPct),
+                  shareCount:              metrics.shareCount ?? null,
+                  estimatedMinutesWatched: metrics.estimatedMinutesWatched ?? null,
+                  subscribersGained:       metrics.subscribersGained ?? null,
+                  subscribersLost:         metrics.subscribersLost ?? null,
+                })
+                .where(
+                  and(
+                    eq(videoMetricSnapshots.publishedVideoId, publishedVideoId),
+                    eq(videoMetricSnapshots.fetchedAt, writeResult.fetchedAt),
+                  ),
+                );
+            }
+          } catch (analyticsErr) {
+            const analyticsMsg = analyticsErr instanceof Error ? analyticsErr.message : String(analyticsErr);
+            result.errors.push(`youtube/analytics:${accountId} ${analyticsMsg.slice(0, 180)}`);
+          }
+        }
+
         break;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1182,4 +1457,676 @@ export async function getPublishingAnalyticsAction(filters?: {
         : null,
     },
   };
+}
+
+export async function getTopicPerformanceAction(filters?: {
+  platform?: SupportedPlatform;
+  platformAccountId?: number | null;
+  limit?: number;
+}): Promise<TopicPerformanceRow[]> {
+  await ensurePlatformAccountsLinked();
+  await backfillPublishedVideosAction();
+
+  const selectedPlatform = filters?.platform ?? "youtube";
+  const selectedPlatformAccountId = filters?.platformAccountId ?? null;
+  const limit = Math.max(5, Math.min(filters?.limit ?? 50, 200));
+
+  const videos = await db.query.publishedVideos.findMany({
+    with: {
+      content: true,
+    },
+    where: selectedPlatformAccountId != null
+      ? and(
+          eq(publishedVideos.platform, selectedPlatform),
+          eq(publishedVideos.platformAccountId, selectedPlatformAccountId),
+        )
+      : eq(publishedVideos.platform, selectedPlatform),
+    orderBy: (t, { desc: orderDesc }) => orderDesc(t.publishedAt),
+  });
+
+  const topicVideos = videos.filter((video) => {
+    const topic = video.content?.topic?.trim();
+    return Boolean(topic);
+  });
+
+  const snapshotRows = topicVideos.length === 0
+    ? []
+    : await db.query.videoMetricSnapshots.findMany({
+        where: inArray(videoMetricSnapshots.publishedVideoId, topicVideos.map((video) => video.id)),
+        orderBy: (t, { desc: orderDesc }) => [orderDesc(t.fetchedAt)],
+      });
+
+  const latestSnapshotByVideo = new Map<string, typeof snapshotRows[number]>();
+  for (const row of snapshotRows) {
+    if (!latestSnapshotByVideo.has(row.publishedVideoId)) {
+      latestSnapshotByVideo.set(row.publishedVideoId, row);
+    }
+  }
+
+  const aggregate = new Map<string, {
+    topic: string;
+    niche: string | null;
+    contentProfileKey: string | null;
+    videoCount: number;
+    totalViews: number;
+    durationSum: number;
+    durationCount: number;
+    retentionSum: number;
+    retentionCount: number;
+    lastPublishedAt: Date | null;
+  }>();
+
+  for (const video of topicVideos) {
+    const topic = video.content?.topic?.trim();
+    if (!topic) continue;
+    const niche = video.content?.nicheName ?? null;
+    const contentProfileKey = video.content?.contentProfileKey ?? null;
+    const snapshot = latestSnapshotByVideo.get(video.id);
+    const views = snapshot ? toCount(snapshot.viewCount) : toCount(video.latestViewCount);
+    const duration = snapshot?.avgViewDurationSec ?? null;
+    const retention = snapshot?.retentionPct == null ? null : Number(snapshot.retentionPct);
+
+    const existing = aggregate.get(topic) ?? {
+      topic,
+      niche,
+      contentProfileKey,
+      videoCount: 0,
+      totalViews: 0,
+      durationSum: 0,
+      durationCount: 0,
+      retentionSum: 0,
+      retentionCount: 0,
+      lastPublishedAt: null,
+    };
+
+    existing.videoCount += 1;
+    existing.totalViews += views;
+    if (duration != null && Number.isFinite(duration)) {
+      existing.durationSum += duration;
+      existing.durationCount += 1;
+    }
+    if (retention != null && Number.isFinite(retention)) {
+      existing.retentionSum += retention;
+      existing.retentionCount += 1;
+    }
+    if (
+      video.publishedAt &&
+      (!existing.lastPublishedAt || video.publishedAt.getTime() > existing.lastPublishedAt.getTime())
+    ) {
+      existing.lastPublishedAt = video.publishedAt;
+    }
+    aggregate.set(topic, existing);
+  }
+
+  return Array.from(aggregate.values())
+    .map((row) => ({
+      topic: row.topic,
+      niche: row.niche,
+      contentProfileKey: row.contentProfileKey,
+      videoCount: row.videoCount,
+      avgViews: row.videoCount > 0 ? Math.round(row.totalViews / row.videoCount) : 0,
+      avgViewDurationSec: row.durationCount > 0 ? Math.round(row.durationSum / row.durationCount) : null,
+      avgRetentionPct: row.retentionCount > 0
+        ? Number((row.retentionSum / row.retentionCount).toFixed(2))
+        : null,
+      lastPublishedAt: row.lastPublishedAt,
+    }))
+    .sort((a, b) => {
+      if (b.avgViews !== a.avgViews) return b.avgViews - a.avgViews;
+      if (b.videoCount !== a.videoCount) return b.videoCount - a.videoCount;
+      return a.topic.localeCompare(b.topic, "vi");
+    })
+    .slice(0, limit);
+}
+
+export async function getTopicPerformanceSummaryAction(filters?: {
+  platform?: SupportedPlatform;
+  platformAccountId?: number | null;
+  limit?: number;
+}): Promise<TopicPerformanceSummary> {
+  const rows = await getTopicPerformanceAction({
+    platform: filters?.platform,
+    platformAccountId: filters?.platformAccountId,
+    limit: Math.max(10, Math.min(filters?.limit ?? 200, 200)),
+  });
+
+  if (rows.length === 0) {
+    return {
+      highPerformers: [],
+      mediumPerformers: [],
+      lowPerformers: [],
+      topKeywords: [],
+      weakKeywords: [],
+      observations: ["Chưa có đủ dữ liệu published video để tổng hợp topic performance."],
+    };
+  }
+
+  const viewValues = rows.map((row) => row.avgViews);
+  const retentionValues = rows
+    .map((row) => row.avgRetentionPct)
+    .filter((value): value is number => value != null && Number.isFinite(value));
+  const durationValues = rows
+    .map((row) => row.avgViewDurationSec)
+    .filter((value): value is number => value != null && Number.isFinite(value));
+
+  const scoredRows = rows.map((row) => {
+    const viewRank = percentileRank(viewValues, row.avgViews) ?? 0;
+    const retentionRank = percentileRank(retentionValues, row.avgRetentionPct) ?? null;
+    const durationRank = percentileRank(durationValues, row.avgViewDurationSec) ?? null;
+    const composite = averageNumbers([viewRank, retentionRank, durationRank]) ?? viewRank;
+    return {
+      row,
+      score: Number(composite.toFixed(4)),
+    };
+  });
+
+  const highPerformers = scoredRows
+    .filter((entry) => entry.score >= 0.67)
+    .map((entry) => entry.row);
+  const lowPerformers = scoredRows
+    .filter((entry) => entry.score <= 0.34)
+    .map((entry) => entry.row);
+  const mediumPerformers = scoredRows
+    .filter((entry) => entry.score > 0.34 && entry.score < 0.67)
+    .map((entry) => entry.row);
+
+  const topKeywords = collectKeywordCounts(highPerformers)
+    .slice(0, 8)
+    .map(([keyword]) => keyword);
+  const weakKeywords = collectKeywordCounts(lowPerformers)
+    .slice(0, 8)
+    .map(([keyword]) => keyword);
+
+  const highAngles = detectRecurringAngles(highPerformers);
+  const lowAngles = detectRecurringAngles(lowPerformers);
+  const observations: string[] = [];
+
+  const averageViewsHigh = averageNumbers(highPerformers.map((row) => row.avgViews)) ?? 0;
+  const averageViewsLow = averageNumbers(lowPerformers.map((row) => row.avgViews)) ?? 0;
+  const averageRetentionHigh = averageNumbers(highPerformers.map((row) => row.avgRetentionPct));
+  const averageRetentionLow = averageNumbers(lowPerformers.map((row) => row.avgRetentionPct));
+
+  if (highPerformers.length > 0) {
+    observations.push(
+      `Nhóm hiệu suất cao hiện nghiêng về các topic mang keyword: ${topKeywords.slice(0, 5).join(", ") || "chưa rõ"}.`
+    );
+  }
+  if (highAngles.length > 0) {
+    observations.push(
+      `Các góc cảm xúc lặp lại ở nhóm tốt: ${highAngles.join(", ")}.`
+    );
+  }
+  if (lowPerformers.length > 0) {
+    observations.push(
+      `Nhóm hiệu suất thấp xuất hiện nhiều ở keyword: ${weakKeywords.slice(0, 5).join(", ") || "chưa rõ"}.`
+    );
+  }
+  if (lowAngles.length > 0) {
+    observations.push(
+      `Các góc cảm xúc dễ hụt hiệu suất hiện tại: ${lowAngles.join(", ")}.`
+    );
+  }
+  if (highPerformers.length > 0 && lowPerformers.length > 0) {
+    observations.push(
+      `Avg views nhóm cao khoảng ${Math.round(averageViewsHigh).toLocaleString("vi-VN")} so với ${Math.round(averageViewsLow).toLocaleString("vi-VN")} ở nhóm thấp.`
+    );
+  }
+  if (averageRetentionHigh != null || averageRetentionLow != null) {
+    observations.push(
+      `Retention trung bình nhóm cao: ${averageRetentionHigh != null ? averageRetentionHigh.toFixed(2) : "n/a"}% · nhóm thấp: ${averageRetentionLow != null ? averageRetentionLow.toFixed(2) : "n/a"}%.`
+    );
+  }
+  const lowConfidenceCount = rows.filter((row) => row.videoCount < 2).length;
+  if (lowConfidenceCount > 0) {
+    observations.push(
+      `${lowConfidenceCount}/${rows.length} topic hiện mới có dưới 2 video, nên pattern vẫn cần đọc như tín hiệu sớm chứ chưa phải kết luận chắc.`
+    );
+  }
+
+  return {
+    highPerformers,
+    mediumPerformers,
+    lowPerformers,
+    topKeywords,
+    weakKeywords,
+    observations,
+  };
+}
+
+export async function getTopicCoverageReportAction(filters?: {
+  platform?: SupportedPlatform;
+  platformAccountId?: number | null;
+  limit?: number;
+}): Promise<TopicCoverageClusterRow[]> {
+  const rows = await getTopicPerformanceAction({
+    platform: filters?.platform,
+    platformAccountId: filters?.platformAccountId,
+    limit: Math.max(20, Math.min(filters?.limit ?? 200, 200)),
+  });
+
+  const aggregate = new Map<string, {
+    clusterName: string;
+    videoCount: number;
+    totalViews: number;
+    durationWeightedSum: number;
+    durationVideoCount: number;
+    retentionWeightedSum: number;
+    retentionVideoCount: number;
+    topics: string[];
+  }>();
+
+  for (const row of rows) {
+    const clusterName = resolveTopicClusterName(row.topic, row.contentProfileKey);
+    const current = aggregate.get(clusterName) ?? {
+      clusterName,
+      videoCount: 0,
+      totalViews: 0,
+      durationWeightedSum: 0,
+      durationVideoCount: 0,
+      retentionWeightedSum: 0,
+      retentionVideoCount: 0,
+      topics: [],
+    };
+
+    current.videoCount += row.videoCount;
+    current.totalViews += row.avgViews * row.videoCount;
+    if (row.avgViewDurationSec != null) {
+      current.durationWeightedSum += row.avgViewDurationSec * row.videoCount;
+      current.durationVideoCount += row.videoCount;
+    }
+    if (row.avgRetentionPct != null) {
+      current.retentionWeightedSum += row.avgRetentionPct * row.videoCount;
+      current.retentionVideoCount += row.videoCount;
+    }
+    current.topics.push(row.topic);
+    aggregate.set(clusterName, current);
+  }
+
+  return Array.from(aggregate.values())
+    .map((row) => ({
+      clusterName: row.clusterName,
+      videoCount: row.videoCount,
+      avgViews: row.videoCount > 0 ? Math.round(row.totalViews / row.videoCount) : 0,
+      avgRetentionPct: row.retentionVideoCount > 0
+        ? Number((row.retentionWeightedSum / row.retentionVideoCount).toFixed(2))
+        : null,
+      avgWatchDurationSec: row.durationVideoCount > 0
+        ? Math.round(row.durationWeightedSum / row.durationVideoCount)
+        : null,
+      topicCount: row.topics.length,
+      topics: row.topics.sort((a, b) => a.localeCompare(b, "vi")),
+    }))
+    .sort((a, b) => {
+      if (b.videoCount !== a.videoCount) return b.videoCount - a.videoCount;
+      if (b.avgViews !== a.avgViews) return b.avgViews - a.avgViews;
+      return a.clusterName.localeCompare(b.clusterName, "vi");
+    });
+}
+
+// ── Strategic topic family coverage (Phase 3A) ────────────────────────────
+
+function getSampleDepthStatus(count: number): string {
+  if (count === 0) return "No data";
+  if (count <= 4) return "Too thin";
+  if (count <= 9) return "Early signal";
+  if (count <= 19) return "Usable signal";
+  if (count <= 49) return "Decision-ready";
+  return "Strong sample";
+}
+
+function getSprintLabel(
+  familyId: string,
+): StrategicFamilyCoverageRow["sprintLabel"] {
+  if (familyId === NEEDS_REVIEW_FAMILY) return "Needs review";
+  if (familyId === PHAT_PHAP_SPRINT.focusFamily) return "Focus";
+  if (PHAT_PHAP_SPRINT.secondaryFamilies.includes(familyId as StrategicTopicFamilyId)) return "Secondary";
+  if (PHAT_PHAP_SPRINT.exploreFamilies.includes(familyId as StrategicTopicFamilyId)) return "Explore";
+  if (PHAT_PHAP_SPRINT.lowPriorityFamilies.includes(familyId as StrategicTopicFamilyId)) return "Low priority";
+  return null;
+}
+
+function isQuoteFormat(formatType: string | null): boolean {
+  return formatType === "legacy_quote_short" || formatType === "quote_short";
+}
+
+/**
+ * Returns strategic topic family coverage for the phat_phap channel.
+ * Queries content_generations directly — includes both published and unpublished content.
+ * Does NOT include retention metrics (quote/photo would skew video-only retention data).
+ */
+export async function getStrategicFamilyCoverageAction(): Promise<StrategicFamilyCoverageRow[]> {
+  const now = new Date();
+  const ms3d = now.getTime() - 3 * 24 * 60 * 60 * 1000;
+  const ms7d = now.getTime() - 7 * 24 * 60 * 60 * 1000;
+  const ms30d = now.getTime() - 30 * 24 * 60 * 60 * 1000;
+  const cut3d = new Date(ms3d);
+  const cut7d = new Date(ms7d);
+  const cut30d = new Date(ms30d);
+
+  const rows = await db.query.contentGenerations.findMany({
+    where: and(
+      eq(contentGenerations.channelKey, "phat_phap"),
+      eq(contentGenerations.status, "completed"),
+    ),
+    columns: {
+      topic: true,
+      topicFamily: true,
+      formatType: true,
+      createdAt: true,
+    },
+    orderBy: (t, { desc: d }) => d(t.createdAt),
+  });
+
+  type FamilyAgg = {
+    familyId: string;
+    total: number; last3d: number; last7d: number; last30d: number;
+    videoTotal: number; videoLast3d: number; videoLast7d: number; videoLast30d: number;
+    quoteTotal: number; quoteLast3d: number; quoteLast7d: number; quoteLast30d: number;
+    topics: Set<string>;
+  };
+
+  const agg = new Map<string, FamilyAgg>();
+
+  const ensure = (fid: string): FamilyAgg => {
+    if (!agg.has(fid)) {
+      agg.set(fid, {
+        familyId: fid,
+        total: 0, last3d: 0, last7d: 0, last30d: 0,
+        videoTotal: 0, videoLast3d: 0, videoLast7d: 0, videoLast30d: 0,
+        quoteTotal: 0, quoteLast3d: 0, quoteLast7d: 0, quoteLast30d: 0,
+        topics: new Set(),
+      });
+    }
+    return agg.get(fid)!;
+  };
+
+  for (const row of rows) {
+    const rawFamily = row.topicFamily
+      ? normalizeTopicFamily(row.topicFamily)
+      : null;
+    const familyId = rawFamily ?? inferStrategicTopicFamily(row.topic ?? "");
+    const bucket = ensure(familyId);
+
+    const createdAt = row.createdAt ?? now;
+    const inLast3d = createdAt >= cut3d;
+    const inLast7d = createdAt >= cut7d;
+    const inLast30d = createdAt >= cut30d;
+    const isQuote = isQuoteFormat(row.formatType);
+
+    bucket.total += 1;
+    if (inLast3d) bucket.last3d += 1;
+    if (inLast7d) bucket.last7d += 1;
+    if (inLast30d) bucket.last30d += 1;
+
+    if (isQuote) {
+      bucket.quoteTotal += 1;
+      if (inLast3d) bucket.quoteLast3d += 1;
+      if (inLast7d) bucket.quoteLast7d += 1;
+      if (inLast30d) bucket.quoteLast30d += 1;
+    } else {
+      bucket.videoTotal += 1;
+      if (inLast3d) bucket.videoLast3d += 1;
+      if (inLast7d) bucket.videoLast7d += 1;
+      if (inLast30d) bucket.videoLast30d += 1;
+    }
+
+    if (row.topic) bucket.topics.add(row.topic);
+  }
+
+  // Ensure all sprint families appear even if empty
+  const allFamilies = [
+    PHAT_PHAP_SPRINT.focusFamily,
+    ...PHAT_PHAP_SPRINT.secondaryFamilies,
+    ...PHAT_PHAP_SPRINT.exploreFamilies,
+    ...PHAT_PHAP_SPRINT.lowPriorityFamilies,
+    NEEDS_REVIEW_FAMILY,
+  ];
+  for (const fid of allFamilies) ensure(fid);
+
+  const SPRINT_ORDER: Record<string, number> = { Focus: 0, Secondary: 1, Explore: 2, "Low priority": 3, "Needs review": 4 };
+
+  return Array.from(agg.values())
+    .map((b): StrategicFamilyCoverageRow => ({
+      familyId: b.familyId,
+      displayName: STRATEGIC_FAMILY_DISPLAY[b.familyId as StrategicTopicFamilyId] ?? b.familyId,
+      sprintLabel: getSprintLabel(b.familyId),
+      sampleDepth: { total: b.total, last3d: b.last3d, last7d: b.last7d, last30d: b.last30d },
+      videoCount: { total: b.videoTotal, last3d: b.videoLast3d, last7d: b.videoLast7d, last30d: b.videoLast30d },
+      quoteCount: { total: b.quoteTotal, last3d: b.quoteLast3d, last7d: b.quoteLast7d, last30d: b.quoteLast30d },
+      sampleDepthStatus: getSampleDepthStatus(b.total),
+      topics: Array.from(b.topics).sort((a, z) => a.localeCompare(z, "vi")).slice(0, 20),
+    }))
+    .sort((a, b) => {
+      const ao = SPRINT_ORDER[a.sprintLabel ?? ""] ?? 3;
+      const bo = SPRINT_ORDER[b.sprintLabel ?? ""] ?? 3;
+      if (ao !== bo) return ao - bo;
+      return b.sampleDepth.total - a.sampleDepth.total;
+    });
+}
+
+export async function getHookPerformanceAction(filters?: {
+  platform?: SupportedPlatform;
+  platformAccountId?: number | null;
+  limit?: number;
+}): Promise<HookPerformanceRow[]> {
+  await ensurePlatformAccountsLinked();
+  await backfillPublishedVideosAction();
+
+  const selectedPlatform = filters?.platform ?? "youtube";
+  const selectedPlatformAccountId = filters?.platformAccountId ?? null;
+  const limit = Math.max(5, Math.min(filters?.limit ?? 100, 300));
+
+  const videos = await db.query.publishedVideos.findMany({
+    with: { content: true },
+    where: selectedPlatformAccountId != null
+      ? and(
+          eq(publishedVideos.platform, selectedPlatform),
+          eq(publishedVideos.platformAccountId, selectedPlatformAccountId),
+          eq(publishedVideos.videoType, "short"),
+        )
+      : and(
+          eq(publishedVideos.platform, selectedPlatform),
+          eq(publishedVideos.videoType, "short"),
+        ),
+    orderBy: (t, { desc: orderDesc }) => orderDesc(t.publishedAt),
+  });
+
+  const hookVideos = videos.filter((v) => v.content?.shortSelectedHook?.trim());
+
+  const snapshotRows = hookVideos.length === 0
+    ? []
+    : await db.query.videoMetricSnapshots.findMany({
+        where: inArray(videoMetricSnapshots.publishedVideoId, hookVideos.map((v) => v.id)),
+        orderBy: (t, { desc: orderDesc }) => [orderDesc(t.fetchedAt)],
+      });
+
+  const latestSnapshotByVideo = new Map<string, typeof snapshotRows[number]>();
+  for (const row of snapshotRows) {
+    if (!latestSnapshotByVideo.has(row.publishedVideoId)) {
+      latestSnapshotByVideo.set(row.publishedVideoId, row);
+    }
+  }
+
+  const aggregate = new Map<string, {
+    hookText: string;
+    hookPattern: string | null;
+    hookType: string | null;
+    topic: string | null;
+    niche: string | null;
+    videoCount: number;
+    totalViews: number;
+    durationSum: number;
+    durationCount: number;
+    retentionSum: number;
+    retentionCount: number;
+    lastPublishedAt: Date | null;
+  }>();
+
+  for (const video of hookVideos) {
+    const hookText = video.content!.shortSelectedHook!.trim();
+    const hookPattern = video.content?.hookPattern ?? null;
+    const hookType = video.content?.hookType ?? null;
+    const topic = video.content?.topic ?? null;
+    const niche = video.content?.nicheName ?? null;
+    const snapshot = latestSnapshotByVideo.get(video.id);
+    const views = snapshot ? toCount(snapshot.viewCount) : toCount(video.latestViewCount);
+    const duration = snapshot?.avgViewDurationSec ?? null;
+    const retention = snapshot?.retentionPct == null ? null : Number(snapshot.retentionPct);
+
+    const existing = aggregate.get(hookText) ?? {
+      hookText,
+      hookPattern,
+      hookType,
+      topic,
+      niche,
+      videoCount: 0,
+      totalViews: 0,
+      durationSum: 0,
+      durationCount: 0,
+      retentionSum: 0,
+      retentionCount: 0,
+      lastPublishedAt: null,
+    };
+
+    existing.videoCount += 1;
+    existing.totalViews += views;
+    if (duration != null && Number.isFinite(duration)) {
+      existing.durationSum += duration;
+      existing.durationCount += 1;
+    }
+    if (retention != null && Number.isFinite(retention)) {
+      existing.retentionSum += retention;
+      existing.retentionCount += 1;
+    }
+    if (
+      video.publishedAt &&
+      (!existing.lastPublishedAt || video.publishedAt.getTime() > existing.lastPublishedAt.getTime())
+    ) {
+      existing.lastPublishedAt = video.publishedAt;
+    }
+    aggregate.set(hookText, existing);
+  }
+
+  return Array.from(aggregate.values())
+    .map((row) => ({
+      hookText: row.hookText,
+      hookPattern: row.hookPattern,
+      hookType: row.hookType,
+      topic: row.topic,
+      niche: row.niche,
+      videoCount: row.videoCount,
+      avgViews: row.videoCount > 0 ? Math.round(row.totalViews / row.videoCount) : 0,
+      avgViewDurationSec: row.durationCount > 0 ? Math.round(row.durationSum / row.durationCount) : null,
+      avgRetentionPct: row.retentionCount > 0
+        ? Number((row.retentionSum / row.retentionCount).toFixed(2))
+        : null,
+      lastPublishedAt: row.lastPublishedAt,
+      lowConfidence: row.videoCount < 2,
+    }))
+    .sort((a, b) => {
+      const aR = a.avgRetentionPct ?? -1;
+      const bR = b.avgRetentionPct ?? -1;
+      if (bR !== aR) return bR - aR;
+      return b.avgViews - a.avgViews;
+    })
+    .slice(0, limit);
+}
+
+export async function getHookTypePerformanceAction(filters?: {
+  platform?: SupportedPlatform;
+  platformAccountId?: number | null;
+}): Promise<HookTypePerformanceRow[]> {
+  await ensurePlatformAccountsLinked();
+  await backfillPublishedVideosAction();
+
+  const selectedPlatform = filters?.platform ?? "youtube";
+  const selectedPlatformAccountId = filters?.platformAccountId ?? null;
+
+  const videos = await db.query.publishedVideos.findMany({
+    with: { content: true },
+    where: selectedPlatformAccountId != null
+      ? and(
+          eq(publishedVideos.platform, selectedPlatform),
+          eq(publishedVideos.platformAccountId, selectedPlatformAccountId),
+          eq(publishedVideos.videoType, "short"),
+        )
+      : and(
+          eq(publishedVideos.platform, selectedPlatform),
+          eq(publishedVideos.videoType, "short"),
+        ),
+    orderBy: (t, { desc: orderDesc }) => orderDesc(t.publishedAt),
+  });
+
+  const hookVideos = videos.filter((v) => v.content?.shortSelectedHook?.trim());
+
+  const snapshotRows = hookVideos.length === 0
+    ? []
+    : await db.query.videoMetricSnapshots.findMany({
+        where: inArray(videoMetricSnapshots.publishedVideoId, hookVideos.map((v) => v.id)),
+        orderBy: (t, { desc: orderDesc }) => [orderDesc(t.fetchedAt)],
+      });
+
+  const latestSnapshotByVideo = new Map<string, typeof snapshotRows[number]>();
+  for (const row of snapshotRows) {
+    if (!latestSnapshotByVideo.has(row.publishedVideoId)) {
+      latestSnapshotByVideo.set(row.publishedVideoId, row);
+    }
+  }
+
+  type TypeAgg = {
+    videoCount: number;
+    totalViews: number;
+    durationSum: number;
+    durationCount: number;
+    retentionSum: number;
+    retentionCount: number;
+  };
+  const typeMap = new Map<string, TypeAgg>();
+
+  for (const video of hookVideos) {
+    const hookType = (video.content?.hookType as HookType | null | undefined) ?? "other";
+    const snapshot = latestSnapshotByVideo.get(video.id);
+    const views = snapshot ? toCount(snapshot.viewCount) : toCount(video.latestViewCount);
+    const duration = snapshot?.avgViewDurationSec ?? null;
+    const retention = snapshot?.retentionPct == null ? null : Number(snapshot.retentionPct);
+
+    const existing = typeMap.get(hookType) ?? {
+      videoCount: 0,
+      totalViews: 0,
+      durationSum: 0,
+      durationCount: 0,
+      retentionSum: 0,
+      retentionCount: 0,
+    };
+    existing.videoCount += 1;
+    existing.totalViews += views;
+    if (duration != null && Number.isFinite(duration)) {
+      existing.durationSum += duration;
+      existing.durationCount += 1;
+    }
+    if (retention != null && Number.isFinite(retention)) {
+      existing.retentionSum += retention;
+      existing.retentionCount += 1;
+    }
+    typeMap.set(hookType, existing);
+  }
+
+  return Array.from(typeMap.entries())
+    .map(([hookType, agg]) => ({
+      hookType,
+      displayName: HOOK_TYPE_DISPLAY[hookType as HookType] ?? hookType,
+      videoCount: agg.videoCount,
+      avgViews: agg.videoCount > 0 ? Math.round(agg.totalViews / agg.videoCount) : 0,
+      avgViewDurationSec: agg.durationCount > 0 ? Math.round(agg.durationSum / agg.durationCount) : null,
+      avgRetentionPct: agg.retentionCount > 0
+        ? Number((agg.retentionSum / agg.retentionCount).toFixed(2))
+        : null,
+      lowConfidence: agg.videoCount < 3,
+    }))
+    .sort((a, b) => {
+      const aR = a.avgRetentionPct ?? -1;
+      const bR = b.avgRetentionPct ?? -1;
+      if (bR !== aR) return bR - aR;
+      return b.avgViews - a.avgViews;
+    });
 }

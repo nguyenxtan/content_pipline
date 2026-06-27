@@ -12,5 +12,7 @@ export async function POST(req: Request) {
     success: true,
     videoPath: result.videoPath,
     durationMs: result.durationMs,
+    subtitleHealthScore: result.subtitleHealthScore,
+    subtitleStatus: result.subtitleStatus,
   });
 }

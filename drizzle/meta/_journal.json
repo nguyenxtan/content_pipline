@@ -64,6 +64,34 @@
       "when": 1779527026625,
       "tag": "0008_daffy_peter_parker",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1780732299965,
+      "tag": "0009_finance_news_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1780733791649,
+      "tag": "0010_finance_freshness_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1780737237905,
+      "tag": "0011_finance_source_quality",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1780739791844,
+      "tag": "0012_finance_image_cache",
+      "breakpoints": true
     }
   ]
 }

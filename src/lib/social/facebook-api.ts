@@ -4,6 +4,8 @@ import { db } from "@/lib/db";
 import { socialChannels } from "@/lib/db/schema";
 import { and, eq } from "drizzle-orm";
 import { notifyFacebookPageDisconnected } from "@/lib/social/telegram";
+import { buildSafeFacebookCaption } from "@/lib/social/youtube-metadata";
+import { DEFAULT_CHANNEL_KEY, normalizeChannelKey, resolveChannelKey } from "@/lib/config/channel-configs";
 
 const GRAPH_VERSION = process.env.FACEBOOK_GRAPH_VERSION ?? "v25.0";
 const PAGE_ID = process.env.FACEBOOK_PAGE_ID;
@@ -59,18 +61,22 @@ export function hasFacebookAppConfig(): boolean {
   return !!(APP_ID && APP_SECRET);
 }
 
-async function getStoredFacebookChannelByPageId(pageId: string) {
+async function getStoredFacebookChannelByPageId(
+  pageId: string,
+  channelKey: string = DEFAULT_CHANNEL_KEY,
+) {
   return db.query.socialChannels.findFirst({
     where: and(
       eq(socialChannels.platform, "facebook"),
       eq(socialChannels.platformChannelId, pageId),
+      eq(socialChannels.channelKey, channelKey),
     ),
   });
 }
 
 async function resolveFacebookPageToken(pageId: string): Promise<string | null> {
   if (PAGE_ACCESS_TOKEN) return PAGE_ACCESS_TOKEN;
-  const stored = await getStoredFacebookChannelByPageId(pageId);
+  const stored = await getStoredFacebookChannelByPageId(pageId, DEFAULT_CHANNEL_KEY);
   if (stored?.accessToken) return stored.accessToken;
   return null;
 }
@@ -122,15 +128,29 @@ export async function syncFacebookEnvPageToDb(): Promise<
   const info = await verifyFacebookEnvToken();
   if ("error" in info) return info;
 
-  const existing = await db.query.socialChannels.findFirst({
+  const ownershipConflict = await db.query.socialChannels.findFirst({
     where: and(
       eq(socialChannels.platform, "facebook"),
       eq(socialChannels.platformChannelId, info.id),
     ),
   });
+  if (ownershipConflict && normalizeChannelKey(ownershipConflict.channelKey) !== DEFAULT_CHANNEL_KEY) {
+    return {
+      error: `Facebook Page "${info.name}" đã được gán cho channelKey "${ownershipConflict.channelKey}", không thể sync vào Phật Pháp env fallback.`,
+    };
+  }
+
+  const existing = await db.query.socialChannels.findFirst({
+    where: and(
+      eq(socialChannels.platform, "facebook"),
+      eq(socialChannels.platformChannelId, info.id),
+      eq(socialChannels.channelKey, DEFAULT_CHANNEL_KEY),
+    ),
+  });
 
   const data = {
     platform: "facebook" as const,
+    channelKey: DEFAULT_CHANNEL_KEY,
     name: info.name,
     platformChannelId: info.id,
     platformHandle: null,
@@ -173,6 +193,7 @@ export async function refreshFacebookEnvHealth(): Promise<FacebookEnvHealth> {
       where: and(
         eq(socialChannels.platform, "facebook"),
         eq(socialChannels.platformChannelId, PAGE_ID),
+        eq(socialChannels.channelKey, DEFAULT_CHANNEL_KEY),
       ),
     });
     if (existing) {
@@ -259,9 +280,10 @@ export async function rotateFacebookPageToken(userAccessToken: string): Promise<
         }),
       );
       if (directPage.id === PAGE_ID) {
-        const existing = await getStoredFacebookChannelByPageId(directPage.id);
+        const existing = await getStoredFacebookChannelByPageId(directPage.id, DEFAULT_CHANNEL_KEY);
         const data = {
           platform: "facebook" as const,
+          channelKey: DEFAULT_CHANNEL_KEY,
           name: directPage.name,
           platformChannelId: directPage.id,
           platformHandle: null,
@@ -322,12 +344,13 @@ export async function rotateFacebookPageToken(userAccessToken: string): Promise<
       return { ok: false, error: `Không tìm thấy Page ${PAGE_ID} trong /me/accounts hoặc token không có quyền truy cập Page` };
     }
 
-    const existing = await getStoredFacebookChannelByPageId(page.id);
+    const existing = await getStoredFacebookChannelByPageId(page.id, DEFAULT_CHANNEL_KEY);
     const tokenExpiresAt = exchange.expires_in
       ? new Date(Date.now() + exchange.expires_in * 1000)
       : null;
     const data = {
       platform: "facebook" as const,
+      channelKey: DEFAULT_CHANNEL_KEY,
       name: page.name,
       platformChannelId: page.id,
       platformHandle: null,
@@ -366,6 +389,108 @@ export async function rotateFacebookPageToken(userAccessToken: string): Promise<
     return {
       ok: false,
       error: error instanceof Error ? error.message : "Không thể rotate Facebook token",
+    };
+  }
+}
+
+export type ManualFacebookPageConnectInput = {
+  channelKey: string;
+  pageId: string;
+  pageAccessToken: string;
+};
+
+export type ManualFacebookPageConnectResult =
+  | {
+      ok: true;
+      channelId: number;
+      pageId: string;
+      pageName: string;
+      channelKey: string;
+      message: string;
+    }
+  | {
+      ok: false;
+      error: string;
+    };
+
+export async function connectFacebookPageManual(
+  input: ManualFacebookPageConnectInput,
+): Promise<ManualFacebookPageConnectResult> {
+  const channelKey = resolveChannelKey(input.channelKey);
+  const pageId = input.pageId.trim();
+  const pageAccessToken = input.pageAccessToken.trim();
+
+  if (!pageId) {
+    return { ok: false, error: "Thiếu Facebook Page ID" };
+  }
+  if (!pageAccessToken) {
+    return { ok: false, error: "Thiếu Facebook Page access token" };
+  }
+
+  try {
+    const page = await fetchJson<{ id: string; name: string }>(
+      graphUrl(pageId, {
+        access_token: pageAccessToken,
+        fields: "id,name",
+      }),
+    );
+    if (!page?.id) {
+      return { ok: false, error: "Facebook API không trả về page info hợp lệ" };
+    }
+
+    const ownershipConflict = await db.query.socialChannels.findFirst({
+      where: and(
+        eq(socialChannels.platform, "facebook"),
+        eq(socialChannels.platformChannelId, page.id),
+      ),
+    });
+    if (ownershipConflict && normalizeChannelKey(ownershipConflict.channelKey) !== channelKey) {
+      return {
+        ok: false,
+        error: `Facebook Page "${page.name}" đã được gán cho channelKey "${ownershipConflict.channelKey}".`,
+      };
+    }
+
+    const existing = await getStoredFacebookChannelByPageId(page.id, channelKey);
+    const data = {
+      platform: "facebook" as const,
+      channelKey,
+      name: page.name,
+      platformChannelId: page.id,
+      platformHandle: null,
+      thumbnailUrl: null,
+      platformAccountId: existing?.platformAccountId ?? null,
+      accessToken: pageAccessToken,
+      refreshToken: null,
+      tokenExpiresAt: null,
+      scope: "manual_page_token",
+      isActive: true,
+      needsReconnect: false,
+      quotaExceededUntil: null,
+      lastError: null,
+      updatedAt: new Date(),
+    };
+
+    let channelId = existing?.id;
+    if (existing) {
+      await db.update(socialChannels).set(data).where(eq(socialChannels.id, existing.id));
+    } else {
+      const [created] = await db.insert(socialChannels).values(data).returning({ id: socialChannels.id });
+      channelId = created.id;
+    }
+
+    return {
+      ok: true,
+      channelId: channelId!,
+      pageId: page.id,
+      pageName: page.name,
+      channelKey,
+      message: "Đã lưu Facebook Page cho kết nối thủ công.",
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "Không thể kết nối Facebook Page",
     };
   }
 }
@@ -521,7 +646,7 @@ export async function uploadToFacebookReel(
           upload_phase: "finish",
           video_id: start.video_id,
           video_state: "PUBLISHED",
-          description: params.description.slice(0, 2200),
+          description: buildSafeFacebookCaption(params.description),
         }),
       },
     );
@@ -567,7 +692,7 @@ export async function uploadToFacebookPhotoPost(
   try {
     const form = new FormData();
     form.set("access_token", accessToken);
-    form.set("message", params.message.slice(0, 2200));
+    form.set("message", buildSafeFacebookCaption(params.message));
     form.set("published", "true");
     form.set("source", new Blob([fs.readFileSync(absPath)], { type: "image/jpeg" }), path.basename(absPath));
 

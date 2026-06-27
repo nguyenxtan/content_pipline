@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import type { Niche } from "@/lib/db/schema";
 import type { ContentGenerationRow, UpdateContentStatusInput } from "@/lib/validations/content-generator";
 import type { PaginatedGenerations, GalleryFiltersInput } from "@/actions/content-generator";
@@ -25,32 +26,41 @@ interface Props {
   niches: Niche[];
   initialData: PaginatedGenerations;
   initialTab?: ContentTab;
+  initialSearch?: string;
 }
 
-const DEFAULT_FILTERS: GalleryToolbarFilters = {
-  topic: "",
-  nicheIds: [],
-  ttsStatus: "",
-  youtubeUploadStatus: "",
-  isLocked: undefined,
-  sortBy: "newest",
-};
+function makeDefaultFilters(initialSearch?: string): GalleryToolbarFilters {
+  const isId = !!initialSearch && initialSearch.length >= 7 && /^[0-9a-f-]+$/i.test(initialSearch);
+  return {
+    topic: isId ? "" : (initialSearch ?? ""),
+    idSearch: isId ? initialSearch : "",
+    nicheIds: [],
+    ttsStatus: "",
+    youtubeUploadStatus: "",
+    isLocked: undefined,
+    sortBy: "newest",
+  };
+}
 
-export function ContentGallery({ niches, initialData, initialTab = "short" }: Props) {
+export function ContentGallery({ niches, initialData, initialTab = "short", initialSearch }: Props) {
+  const router = useRouter();
   const [activeTab] = useState<ContentTab>(initialTab);
   const [data, setData] = useState<PaginatedGenerations>(initialData);
-  const [filters, setFilters] = useState<GalleryToolbarFilters>(DEFAULT_FILTERS);
+  const [filters, setFilters] = useState<GalleryToolbarFilters>(() => makeDefaultFilters(initialSearch));
   const [viewItem, setViewItem] = useState<ContentGenerationRow | null>(null);
   const [editItem, setEditItem] = useState<ContentGenerationRow | null>(null);
   const [isPending, startTransition] = useTransition();
 
   const fetchData = (newFilters: GalleryToolbarFilters, page: number, perPage: number) => {
     startTransition(async () => {
+      const isId = !!newFilters.idSearch;
       const params: GalleryFiltersInput = {
-        topic: newFilters.topic || undefined,
+        topic: isId ? undefined : (newFilters.topic || undefined),
+        idSearch: isId ? newFilters.idSearch : undefined,
         nicheId: newFilters.nicheIds.length === 1 ? newFilters.nicheIds[0] : undefined,
-        ttsStatus: newFilters.ttsStatus || undefined,
-        youtubeUploadStatus: newFilters.youtubeUploadStatus || undefined,
+        // Status filters are bypassed when searching by ID so all statuses are visible
+        ttsStatus: isId ? undefined : (newFilters.ttsStatus || undefined),
+        youtubeUploadStatus: isId ? undefined : (newFilters.youtubeUploadStatus || undefined),
         isLocked: newFilters.isLocked,
         sortBy: newFilters.sortBy,
         contentType: activeTab,
@@ -65,6 +75,15 @@ export function ContentGallery({ niches, initialData, initialTab = "short" }: Pr
   const handleFilterChange = (newFilters: GalleryToolbarFilters) => {
     setFilters(newFilters);
     fetchData(newFilters, 1, data.perPage);
+    // Sync ?q= URL param so the search is bookmarkable
+    const q = newFilters.idSearch || newFilters.topic || "";
+    const url = new URL(window.location.href);
+    if (q) {
+      url.searchParams.set("q", q);
+    } else {
+      url.searchParams.delete("q");
+    }
+    router.replace(url.pathname + (url.search || ""), { scroll: false });
   };
 
   const updateLocal = (id: string, patch: Partial<ContentGenerationRow>) => {
@@ -277,6 +296,7 @@ export function ContentGallery({ niches, initialData, initialTab = "short" }: Pr
         items={data.items}
         activeTab={activeTab}
         isLoading={isPending}
+        searchTerm={filters.idSearch || filters.topic || undefined}
         onView={setViewItem}
         onEditStatus={setEditItem}
         onLock={handleLock}

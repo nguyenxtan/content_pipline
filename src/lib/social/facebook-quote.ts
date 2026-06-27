@@ -1,28 +1,36 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { execFile } from "child_process";
-import { promisify } from "util";
 import { buildFacebookQuoteText } from "@/lib/social/youtube-metadata";
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const ffmpegInstaller = require("@ffmpeg-installer/ffmpeg") as { path: string };
-
-const execFileAsync = promisify(execFile);
-const FFMPEG_PATH = ffmpegInstaller.path;
-const WIDTH = 1080;
-const HEIGHT = 1350;
+import { enhanceSocialImage, type SocialImageEnhancerMetadata } from "@/lib/image/social-image-enhancer";
+import { resolveQuoteVisualStyle } from "@/lib/quotes/quote-style";
 
 export async function renderFacebookQuoteImage(input: {
   contentId: string;
   topic: string;
   shortContent?: string | null;
+  quoteText?: string | null;
   imagePath: string;
-}): Promise<{ imagePath: string; quoteText: string }> {
-  const quoteText = buildFacebookQuoteText({
-    topic: input.topic,
-    shortContent: input.shortContent,
+  channelKey?: string | null;
+  contentProfileKey?: string | null;
+  nicheName?: string | null;
+}): Promise<{ imagePath: string; quoteText: string; metadata: SocialImageEnhancerMetadata }> {
+  const style = resolveQuoteVisualStyle({
+    channelKey: input.channelKey,
+    contentProfileKey: input.contentProfileKey,
+    nicheName: input.nicheName,
+    platform: "facebook",
+    videoType: "quote",
   });
+  const quoteText = input.quoteText?.trim()
+    ? input.quoteText.trim()
+    : buildFacebookQuoteText({
+        topic: input.topic,
+        shortContent: input.shortContent,
+        channelKey: input.channelKey,
+        contentProfileKey: input.contentProfileKey,
+        nicheName: input.nicheName,
+      });
 
   const sourcePath = input.imagePath.startsWith("/")
     ? input.imagePath
@@ -32,26 +40,20 @@ export async function renderFacebookQuoteImage(input: {
   }
 
   const outPath = path.join(os.tmpdir(), `${input.contentId}-fb-quote-${Date.now()}.jpg`);
+  const enhanced = await enhanceSocialImage({
+    sourceImagePath: sourcePath,
+    quoteText,
+    topic: input.topic,
+    format: "facebook_quote",
+    aspectRatio: "4:5",
+    outputPath: outPath,
+    channelName: process.env.FACEBOOK_QUOTE_CHANNEL_NAME ?? null,
+    layoutPreset: style.facebookLayoutPreset,
+  });
 
-  try {
-    const vf = [
-      `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=increase`,
-      `crop=${WIDTH}:${HEIGHT}`,
-      "setsar=1",
-    ].join(",");
-
-    await execFileAsync(FFMPEG_PATH, [
-      "-y",
-      "-loop", "1",
-      "-i", sourcePath,
-      "-frames:v", "1",
-      "-vf", vf,
-      "-q:v", "2",
-      outPath,
-    ], { timeout: 60_000 });
-
-    return { imagePath: outPath, quoteText };
-  } finally {
-    // no temp subtitle/ass assets
-  }
+  return {
+    imagePath: enhanced.enhancedImagePath,
+    quoteText,
+    metadata: enhanced.metadata,
+  };
 }

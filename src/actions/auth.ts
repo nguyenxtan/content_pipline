@@ -1,7 +1,7 @@
 "use server";
 
 import { redirect } from "next/navigation";
-import { checkPassword, createSession, destroySession } from "@/lib/auth";
+import { checkCredentials, createSession, destroySession } from "@/lib/auth";
 
 export type LoginState = { error?: string } | null;
 
@@ -9,9 +9,14 @@ export async function loginAction(
   _prevState: LoginState,
   formData: FormData
 ): Promise<LoginState> {
+  const username = formData.get("username");
   const password = formData.get("password");
-  if (typeof password !== "string" || !checkPassword(password)) {
-    return { error: "Mật khẩu không đúng" };
+  if (
+    typeof username !== "string" ||
+    typeof password !== "string" ||
+    !checkCredentials(username, password)
+  ) {
+    return { error: "Tên đăng nhập hoặc mật khẩu không đúng" };
   }
   await createSession();
   redirect("/");

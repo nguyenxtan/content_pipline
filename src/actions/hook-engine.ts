@@ -6,6 +6,7 @@ import { eq } from "drizzle-orm";
 import { getOpenRouterClient } from "@/lib/llm/openai-client";
 import { logApiUsage } from "@/actions/ai-usage";
 import { runHookEngine, type HookEngineResult } from "@/lib/hook-engine";
+import { getContentProfile } from "@/lib/config/content-profiles";
 
 const DEFAULT_MODEL =
   process.env.CONTENT_GEN_MODEL ??
@@ -24,6 +25,7 @@ export async function runHookEngineAction(input: {
   const niche = input.nicheId
     ? await db.query.niches.findFirst({ where: eq(niches.id, input.nicheId) })
     : null;
+  const profile = getContentProfile(niche?.contentProfileKey);
 
   const client = getOpenRouterClient();
   const dedupBlock = input.dedupTopics?.length
@@ -35,9 +37,10 @@ export async function runHookEngineAction(input: {
       client,
       model: input.model ?? DEFAULT_MODEL,
       topic,
-      nicheName: niche?.name ?? "Phật Pháp",
-      nicheDescription: niche?.description ?? "Nội dung Phật pháp và chữa lành",
-      tone: niche?.tone ?? "Trầm tĩnh, từng trải, gần gũi",
+      nicheName: niche?.name ?? profile.defaultNicheName,
+      nicheDescription: niche?.description ?? profile.defaultNicheDescription,
+      tone: niche?.tone ?? profile.defaultTone,
+      contentProfileKey: niche?.contentProfileKey ?? profile.key,
       dedupBlock,
       count: 20,
     });

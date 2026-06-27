@@ -32,11 +32,25 @@ const FREQUENCY_LABELS: Record<string, string> = Object.fromEntries(
   FREQUENCY_OPTIONS.map(o => [o.value, o.label])
 );
 
-const JOB_TYPE_CONFIG = {
+type JobType = SchedulerJobRecord["jobType"];
+
+const JOB_TYPE_CONFIG: Record<JobType, { label: string; icon: typeof FileText; color: string; badge: string }> = {
   content_gen:    { label: "Tạo content",    icon: FileText, color: "text-violet-400", badge: "bg-violet-900/40 border-violet-700/40 text-violet-400" },
   short_pipeline: { label: "Short pipeline", icon: Video,    color: "text-rose-400",   badge: "bg-rose-900/40   border-rose-700/40   text-rose-400"   },
   long_pipeline:  { label: "Long pipeline",  icon: Film,     color: "text-cyan-400",   badge: "bg-cyan-900/40   border-cyan-700/40   text-cyan-400"   },
+  quote_pipeline: { label: "Quote pipeline", icon: ClipboardList, color: "text-amber-400", badge: "bg-amber-900/40 border-amber-700/40 text-amber-400" },
+};
+
+const UNKNOWN_JOB_TYPE_CONFIG = {
+  label: "Unknown job",
+  icon: XCircle,
+  color: "text-slate-400",
+  badge: "bg-slate-800 border-slate-700 text-slate-400",
 } as const;
+
+function getJobTypeConfig(jobType: string) {
+  return JOB_TYPE_CONFIG[jobType as JobType] ?? UNKNOWN_JOB_TYPE_CONFIG;
+}
 
 const VOICES = [
   { id: "Ly",    name: "Trúc Ly",    gender: "Nữ",  region: "Bắc" },
@@ -112,7 +126,7 @@ function absoluteTime(date: Date | null): string {
 function CreateJobForm({ niches, onCreated }: { niches: Niche[]; onCreated: (job: SchedulerJobRecord) => void }) {
   const active = niches.filter(n => n.isActive);
   const [nicheId,     setNicheId]     = useState(active[0]?.id ?? 0);
-  const [jobType,     setJobType]     = useState<"content_gen" | "short_pipeline" | "long_pipeline">("content_gen");
+  const [jobType,     setJobType]     = useState<JobType>("content_gen");
   const [contentMode, setContentMode] = useState<"short" | "long" | "both">("both");
   const [batchSize,   setBatchSize]   = useState(3);
   const [topic,       setTopic]       = useState("");
@@ -203,6 +217,7 @@ function CreateJobForm({ niches, onCreated }: { niches: Niche[]; onCreated: (job
             <option value="content_gen">📝 Tạo content (AI)</option>
             <option value="short_pipeline">🎬 Short pipeline</option>
             <option value="long_pipeline">🎥 Long pipeline</option>
+            <option value="quote_pipeline">🗂 Quote pipeline</option>
           </select>
         </div>
         <div>
@@ -438,7 +453,7 @@ function EditJobForm({
 }) {
   const active = niches.filter(n => n.isActive);
   const [nicheId,     setNicheId]     = useState(job.nicheId);
-  const [jobType,     setJobType]     = useState<"content_gen" | "short_pipeline" | "long_pipeline">(job.jobType);
+  const [jobType,     setJobType]     = useState<JobType>(job.jobType);
   const [contentMode, setContentMode] = useState<"short" | "long" | "both">(job.contentMode);
   const [batchSize,   setBatchSize]   = useState(job.batchSize ?? 1);
   const [topic,       setTopic]       = useState(job.topic ?? "");
@@ -532,6 +547,7 @@ function EditJobForm({
             <option value="content_gen">Tạo content</option>
             <option value="short_pipeline">Short pipeline</option>
             <option value="long_pipeline">Long pipeline</option>
+            <option value="quote_pipeline">Quote pipeline</option>
           </select>
         </div>
         <div>
@@ -684,6 +700,8 @@ function JobRow({ job, niches, onToggle, onDelete, onRan, onUpdated }: {
     setRunning(false);
     if ("error" in res) {
       setRunResult(`❌ ${res.error}`);
+    } else if ("skipped" in res) {
+      setRunResult(`⏸ Paused: ${res.violations[0] ?? "backpressure"}`);
     } else if (res.processed !== undefined) {
       setRunResult(`✓ Đã xử lý ${res.processed} item`);
       onRan({ lastRunAt: new Date() });
@@ -693,7 +711,7 @@ function JobRow({ job, niches, onToggle, onDelete, onRan, onUpdated }: {
     }
   }
 
-  const cfg = JOB_TYPE_CONFIG[job.jobType];
+  const cfg = getJobTypeConfig(job.jobType);
   const Icon = cfg.icon;
 
   return (

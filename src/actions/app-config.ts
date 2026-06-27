@@ -6,6 +6,7 @@ import { eq } from "drizzle-orm";
 import {
   IMAGE_PROMPT_MODEL_KEY, IMAGE_PROMPT_MODEL_DEFAULT,
   FAL_IMAGE_MODEL_KEY,   FAL_IMAGE_MODEL_DEFAULT,
+  FAL_IMAGE_SIZE_KEY,    FAL_IMAGE_SIZE_DEFAULT,
   IMAGE_COUNT_KEY,       IMAGE_COUNT_DEFAULT,
   IMAGE_STEPS_KEY,
   LONG_IMAGE_PROMPT_MODEL_KEY, LONG_IMAGE_PROMPT_MODEL_DEFAULT,
@@ -51,6 +52,13 @@ export async function setFalImageModel(model: string): Promise<void> {
   await setAppConfig(FAL_IMAGE_MODEL_KEY, model);
 }
 
+export async function getFalImageSize(): Promise<string> {
+  return (await getAppConfig(FAL_IMAGE_SIZE_KEY)) ?? FAL_IMAGE_SIZE_DEFAULT;
+}
+export async function setFalImageSize(size: string): Promise<void> {
+  await setAppConfig(FAL_IMAGE_SIZE_KEY, size);
+}
+
 export async function getImageCount(): Promise<number> {
   const v = await getAppConfig(IMAGE_COUNT_KEY);
   return v ? parseInt(v) : IMAGE_COUNT_DEFAULT;
@@ -71,16 +79,18 @@ export async function setImageSteps(steps: number): Promise<void> {
 export async function getImageConfig(): Promise<{
   llmModel: string;
   falModel: string;
+  imageSize: string;
   numImages: number;
   steps: number | null;
 }> {
-  const [llmModel, falModel, numImages, steps] = await Promise.all([
+  const [llmModel, falModel, imageSize, numImages, steps] = await Promise.all([
     getImagePromptModel(),
     getFalImageModel(),
+    getFalImageSize(),
     getImageCount(),
     getImageSteps(),
   ]);
-  return { llmModel, falModel, numImages, steps };
+  return { llmModel, falModel, imageSize, numImages, steps };
 }
 
 // ── Long video image config ────────────────────────────────────

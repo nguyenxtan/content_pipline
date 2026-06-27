@@ -5,6 +5,7 @@ import { X, TvMinimalPlay as Youtube, Calendar, Lock, Globe, EyeOff, Loader2, Ch
 import type { SocialChannel } from "@/lib/db/schema";
 import type { ContentGenerationRow } from "@/lib/validations/content-generator";
 import { getChannelsAction, scheduleUploadAction } from "@/actions/social-channels";
+import { formatDateTimeLocalInput } from "@/lib/upload-schedule";
 import { buildDefaultVideoDescription, buildDefaultVideoTitle } from "@/lib/social/youtube-metadata";
 
 interface Props {
@@ -34,7 +35,7 @@ export function ScheduleUploadModal({ content, videoType, onClose, onScheduled }
   const [privacyStatus, setPrivacyStatus] = useState<"public" | "private" | "unlisted">("public");
   const [scheduledDate, setScheduledDate] = useState<string>(() => {
     const d = new Date(Date.now() + 5 * 60 * 1000);
-    return d.toISOString().slice(0, 16);
+    return formatDateTimeLocalInput(d);
   });
 
   const applyPlatformDefaults = useCallback((channel: SocialChannel) => {
@@ -42,6 +43,8 @@ export function ScheduleUploadModal({ content, videoType, onClose, onScheduled }
       platform: channel.platform as "youtube" | "facebook",
       contentType: videoType,
       topic: content.topic,
+      contentProfileKey: content.contentProfileKey,
+      shortContent: content.shortContent,
     }));
     setDescription(buildDefaultVideoDescription({
       platform: channel.platform as "youtube" | "facebook",
@@ -51,15 +54,16 @@ export function ScheduleUploadModal({ content, videoType, onClose, onScheduled }
       shortContent: content.shortContent,
       longContent: content.longContent,
       longYoutubeDescription: content.longYoutubeDescription,
+      contentProfileKey: content.contentProfileKey,
     }));
     if (channel.platform === "facebook") {
       setPrivacyStatus("public");
       setTags("");
     }
-  }, [content.longContent, content.longYoutubeDescription, content.nicheName, content.shortContent, content.topic, videoType]);
+  }, [content.contentProfileKey, content.longContent, content.longYoutubeDescription, content.nicheName, content.shortContent, content.topic, videoType]);
 
   useEffect(() => {
-    getChannelsAction().then(chs => {
+    getChannelsAction(undefined, content.channelKey).then(chs => {
       const active = chs.filter((c) => {
         if (!c.isActive || !c.accessToken) return false;
         if (videoType === "long") return c.platform === "youtube";
@@ -73,7 +77,7 @@ export function ScheduleUploadModal({ content, videoType, onClose, onScheduled }
       }
       setLoading(false);
     });
-  }, [applyPlatformDefaults, videoType]);
+  }, [applyPlatformDefaults, content.channelKey, videoType]);
 
   const handleSubmit = async () => {
     setError("");
@@ -129,7 +133,12 @@ export function ScheduleUploadModal({ content, videoType, onClose, onScheduled }
         ) : channels.length === 0 ? (
           <div className="p-6 text-center space-y-3">
             <Youtube className="h-10 w-10 text-slate-600 mx-auto" />
-            <p className="text-sm text-slate-400">Chưa có kênh phù hợp nào được kết nối.</p>
+            <p className="text-sm text-slate-400">
+              {`Chưa có destination phù hợp nào cho channel "${content.channelKey}".`}
+            </p>
+            <p className="text-xs text-slate-500">
+              Hãy kết nối đúng YouTube channel hoặc Facebook Page cho business channel này trước khi lên lịch thủ công.
+            </p>
             <a href="/settings/channels" className="inline-block text-sm text-rose-400 hover:text-rose-300 underline underline-offset-2">
               Kết nối kênh tại Settings → Kênh
             </a>
@@ -139,6 +148,9 @@ export function ScheduleUploadModal({ content, videoType, onClose, onScheduled }
             {/* Channel */}
             <div>
               <label className="block text-xs text-slate-400 mb-1.5">Kênh đăng</label>
+              <p className="text-[11px] text-slate-500 mb-1.5">
+                Chỉ hiển thị destination đã gắn với `channelKey={content.channelKey}`.
+              </p>
               <select
                 value={channelId}
                 onChange={e => {
@@ -239,7 +251,7 @@ export function ScheduleUploadModal({ content, videoType, onClose, onScheduled }
                 className="w-full border border-slate-600 rounded-lg px-3 py-2 text-sm bg-slate-800 text-slate-200 focus:outline-none focus:ring-1 focus:ring-rose-500"
               />
               <p className="text-[11px] text-slate-600 mt-1">
-                {videoType === "quote" ? "Cron job sẽ đăng bài ảnh khi đến thời điểm này." : "Cron job sẽ upload video khi đến thời điểm này."}
+                {videoType === "quote" ? "Cron job sẽ đăng bài ảnh khi đến thời điểm này." : "Cron job sẽ upload video khi đến thời điểm này."} Thời gian lưu trong DB theo UTC và hiển thị ngoài queue theo giờ Việt Nam.
               </p>
             </div>
 

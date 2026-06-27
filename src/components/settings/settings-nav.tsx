@@ -7,7 +7,8 @@ import { cn } from "@/lib/utils";
 
 const ITEMS = [
   { href: "/settings/tokens",   label: "Quản lý Token", icon: KeyRound,  desc: "API keys, chi phí sử dụng"    },
-  { href: "/settings/tts",      label: "Quản lý TTS",   icon: Mic2,      desc: "Giọng đọc, server status"     },
+  { href: "/settings/tts/general", label: "TTS · Legacy", icon: Mic2,   desc: "VieNeu (deprecated)"          },
+  { href: "/settings/tts/aimax",   label: "TTS · AiMax",   icon: Mic2,   desc: "API, balance, voices"         },
   { href: "/settings/images",   label: "Tạo ảnh",       icon: ImageIcon, desc: "Model prompt, chi phí fal.ai" },
   { href: "/settings/music",    label: "Nhạc nền",      icon: Music,     desc: "Tải nhạc từ YouTube"          },
   { href: "/settings/channels", label: "Kênh & Đăng",   icon: Radio,     desc: "YouTube, Facebook, lên lịch"  },

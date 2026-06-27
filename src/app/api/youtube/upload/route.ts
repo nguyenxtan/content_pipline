@@ -13,6 +13,7 @@ import { contentGenerations } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
 import { getAuthorizedClient } from "@/lib/youtube/client";
 import { buildYouTubeVideoMetadata } from "@/lib/social/youtube-metadata";
+import { getChannelPublishConfig, normalizeChannelKey } from "@/lib/config/channel-configs";
 
 export async function POST(req: Request) {
   const { contentId, contentType = "short" } = (await req.json()) as {
@@ -25,6 +26,23 @@ export async function POST(req: Request) {
     where: eq(contentGenerations.id, contentId),
   });
   if (!item) return NextResponse.json({ error: "Không tìm thấy" }, { status: 404 });
+
+  // Legacy direct-upload path is intentionally restricted to the current
+  // production channel until the queue-based multi-channel flow fully replaces it.
+  const channelKey = normalizeChannelKey(item.channelKey);
+  if (!channelKey) {
+    return NextResponse.json({ error: "Content thiếu channelKey hợp lệ" }, { status: 400 });
+  }
+  const publishConfig = await getChannelPublishConfig(channelKey);
+  if (!publishConfig) {
+    return NextResponse.json({ error: `Không tìm thấy publish config cho channel "${channelKey}"` }, { status: 400 });
+  }
+  if (!publishConfig.publishingEnabled || !publishConfig.allowLegacyEnvFallback) {
+    return NextResponse.json(
+      { error: `Legacy YouTube upload không được phép cho channel "${channelKey}"` },
+      { status: 403 },
+    );
+  }
 
   const isLong = contentType === "long";
 
@@ -66,6 +84,7 @@ export async function POST(req: Request) {
       shortContent: item.shortContent,
       longContent: item.longContent,
       longYoutubeDescription: item.longYoutubeDescription,
+      contentProfileKey: item.contentProfileKey,
     });
 
     const res = await youtube.videos.insert({

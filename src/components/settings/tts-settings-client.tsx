@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import {
   Mic2, CheckCircle2, XCircle, RefreshCw, Play, Pause,
-  Loader2, Volume2, Square, Power, PowerOff,
+  Loader2, Volume2, Power, PowerOff,
 } from "lucide-react";
 
 const VOICES = [
@@ -99,8 +99,8 @@ export function TtsSettingsClient() {
   const [quickTestVoice, setQuickTestVoice] = useState<string | null>(null);
   const [quickResults, setQuickResults] = useState<Record<string, { file: string; duration: number }>>({});
 
-  const checkStatus = async () => {
-    setStatus("checking");
+  const checkStatus = async (options?: { showLoading?: boolean }) => {
+    if (options?.showLoading) setStatus("checking");
     try {
       const res = await fetch("/api/tts/health", { signal: AbortSignal.timeout(5000) });
       const data = await res.json() as { online: boolean; queue?: { pending: number; done: number; error: number } | null };
@@ -111,14 +111,31 @@ export function TtsSettingsClient() {
     }
   };
 
-  useEffect(() => { checkStatus(); }, []);
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch("/api/tts/health", { signal: AbortSignal.timeout(5000) });
+        const data = await res.json() as { online: boolean; queue?: { pending: number; done: number; error: number } | null };
+        if (cancelled) return;
+        setStatus(data.online ? "online" : "offline");
+        if (data.queue) setQueueInfo(data.queue);
+      } catch {
+        if (!cancelled) setStatus("offline");
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleStart = async () => {
     setIsStarting(true);
     try {
       const res = await fetch("/api/tts/start", { method: "POST" });
       const data = await res.json() as { success: boolean };
-      if (data.success) await checkStatus();
+      if (data.success) await checkStatus({ showLoading: true });
     } catch { /* ignore */ }
     setIsStarting(false);
   };
@@ -137,7 +154,7 @@ export function TtsSettingsClient() {
   const handleTest = async () => {
     setIsTesting(true);
     setTestResult(null);
-    const contentId = `tts-test-${Date.now()}`;
+    const contentId = `tts-test-${testVoice.toLowerCase()}`;
     const voice = VOICES.find(v => v.id === testVoice);
     try {
       const res = await fetch("/api/tts/test", {
@@ -158,7 +175,7 @@ export function TtsSettingsClient() {
   const handleQuickTest = async (voiceId: string) => {
     if (quickTestVoice === voiceId) return;
     setQuickTestVoice(voiceId);
-    const contentId = `tts-quick-${voiceId}-${Date.now()}`;
+    const contentId = `tts-quick-${voiceId.toLowerCase()}`;
     try {
       const res = await fetch("/api/tts/test", {
         method: "POST",
@@ -176,14 +193,14 @@ export function TtsSettingsClient() {
 
   const triggerCron = async () => {
     await fetch("/api/cron/tts", { method: "POST" });
-    await checkStatus();
+    await checkStatus({ showLoading: true });
   };
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-xl font-bold text-slate-100">Quản lý TTS</h1>
-        <p className="text-sm text-slate-500 mt-0.5">VieNeu-TTS server + cấu hình giọng đọc</p>
+        <h1 className="text-xl font-bold text-slate-100">Legacy VieNeu TTS</h1>
+        <p className="text-sm text-slate-500 mt-0.5">Deprecated — VieNeu is no longer used for new generation. Use AiMax instead.</p>
       </div>
 
       {/* Server status */}
@@ -192,7 +209,7 @@ export function TtsSettingsClient() {
           <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
             <Mic2 className="h-4 w-4 text-rose-400" /> TTS Server
           </h2>
-          <button onClick={checkStatus} className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300 transition-colors">
+          <button onClick={() => void checkStatus({ showLoading: true })} className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300 transition-colors">
             <RefreshCw className="h-3 w-3" /> Refresh
           </button>
         </div>

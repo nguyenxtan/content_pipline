@@ -9,7 +9,9 @@ const ROUTE_LABELS: Record<string, string> = {
   "/": "Dashboard",
   "/niches": "Lĩnh vực",
   "/content": "Nội dung",
-  "/content/gallery": "Gallery",
+  "/content/gallery": "TTS Shorts",
+  "/content/quotes": "Quote Shorts",
+  "/content/scheduler": "Lập lịch",
   "/agent": "Lĩnh vực",
   "/settings": "Cài đặt",
 };

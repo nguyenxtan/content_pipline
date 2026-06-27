@@ -4,9 +4,18 @@ import fs from "fs";
 import path from "path";
 import { db } from "@/lib/db";
 import { socialChannels, uploadQueue, contentGenerations, appConfig, type SocialChannel } from "@/lib/db/schema";
-import { eq, desc, and, lte, notExists, inArray, isNull, isNotNull, gte, count } from "drizzle-orm";
+import { eq, desc, and, lte, notExists, inArray, isNull, isNotNull, gte, count, asc } from "drizzle-orm";
 import { inferFormatType, type ContentFormatType } from "@/lib/content-format-type";
-import { uploadToYouTube, isQuotaExceededError, isAuthError, isTokenRevokedError, isTransientError, nextQuotaResetUtc, pacificMidnightUtc } from "@/lib/social/youtube-api";
+import {
+  uploadToYouTube,
+  isQuotaExceededError,
+  isAuthError,
+  isTokenRevokedError,
+  isTransientError,
+  nextQuotaResetUtc,
+  pacificMidnightUtc,
+  verifyYouTubeUploadDestination,
+} from "@/lib/social/youtube-api";
 import {
   connectFacebookPageManual,
   deleteFacebookPageContentBefore,
@@ -26,12 +35,14 @@ import { resolveFacebookQuoteImageSource, type FacebookQuoteImageSourceMode } fr
 import { buildDefaultVideoDescription, buildDefaultVideoTitle, buildFacebookQuoteText, buildYouTubeVideoMetadata } from "@/lib/social/youtube-metadata";
 import { sendTelegram } from "@/lib/social/telegram";
 import { upsertPublishedVideoFromUploadQueueId } from "@/actions/publishing-analytics";
+import { logApiUsage } from "@/actions/ai-usage";
 import {
   getOverdueMinutes,
   isUploadScheduledDue,
   resolveRetryScheduledAt,
 } from "@/lib/upload-schedule";
 import {
+  CHANNEL_PUBLISH_CONFIGS_KEY,
   DEFAULT_CHANNEL_KEY,
   getChannelDefinition,
   getChannelPublishConfig,
@@ -39,7 +50,26 @@ import {
   normalizeChannelKey,
   resolveChannelKey,
 } from "@/lib/config/channel-configs";
+import { resolveContentProfileKey } from "@/lib/config/content-profiles";
 import { inferWorkspaceFromSignals } from "@/lib/channel-workspace-registry";
+import {
+  findNextAvailablePublishSlot,
+  getSlotOffsetMinutes,
+  getTakenUploadSlotsForDestination,
+  pickFullLaneSafeAnchor,
+} from "@/lib/publishing/slot-occupancy";
+import { createPromptVersionEntry, mergePromptVersions } from "@/lib/prompt-version-registry";
+import {
+  readStoredQuoteArtifactMetadata,
+  resolveFacebookQuoteArtifact,
+  type QuoteArtifactMetadata,
+} from "@/lib/quotes/quote-pipeline";
+import { getYoutubeQuoteSchedulerPolicy } from "@/lib/quotes/youtube-quote-scheduler-policy";
+import { getTangSauIsolationViolation } from "@/lib/content-profile-isolation";
+import {
+  executePhatPhapQueueSync,
+  type PhatPhapQueueSyncResult,
+} from "@/lib/publishing/phat-phap-queue-sync";
 
 type PublishQueueType = "short" | "long" | "quote";
 type UploadProcessResult = {
@@ -50,6 +80,46 @@ type UploadProcessResult = {
   sourceImageMode?: FacebookQuoteImageSourceMode;
   sourceImagePath?: string;
 };
+
+function logUploadEvent(event: string, payload: Record<string, unknown>): void {
+  console.log(`[upload_queue] ${JSON.stringify({ event, ...payload })}`);
+}
+
+const DEFAULT_STALE_BACKLOG_THRESHOLD_MINUTES = 180;
+const GLOBAL_STALE_BACKLOG_THRESHOLD_CONFIG_KEY = "publish.stale_backlog_threshold_minutes";
+const PHAT_PHAP_FB_STALE_BACKLOG_THRESHOLD_CONFIG_KEY = "phat_phap.facebook.stale_backlog_threshold_minutes";
+
+function parsePositiveIntegerConfigValue(
+  value: string | null | undefined,
+  fallback: number,
+): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : fallback;
+}
+
+async function getStaleBacklogThresholdMinutes(
+  channelKey: string,
+  platform: string,
+): Promise<number | null> {
+  if (channelKey !== DEFAULT_CHANNEL_KEY || platform !== "facebook") {
+    return null;
+  }
+
+  const rows = await db
+    .select({ key: appConfig.key, value: appConfig.value })
+    .from(appConfig)
+    .where(inArray(appConfig.key, [
+      PHAT_PHAP_FB_STALE_BACKLOG_THRESHOLD_CONFIG_KEY,
+      GLOBAL_STALE_BACKLOG_THRESHOLD_CONFIG_KEY,
+    ]));
+
+  const configMap = Object.fromEntries(rows.map((row) => [row.key, row.value]));
+  return parsePositiveIntegerConfigValue(
+    configMap[PHAT_PHAP_FB_STALE_BACKLOG_THRESHOLD_CONFIG_KEY]
+      ?? configMap[GLOBAL_STALE_BACKLOG_THRESHOLD_CONFIG_KEY],
+    DEFAULT_STALE_BACKLOG_THRESHOLD_MINUTES,
+  );
+}
 
 async function getChannelPublishSafety(
   channelKeyValue: string | null | undefined,
@@ -97,6 +167,124 @@ function getDestinationOwnershipError(
   if (contentChannelKey === destinationChannelKey) return null;
 
   return `Destination "${destinationName}" thuộc channel "${destinationChannelKey}", không khớp với content channel "${contentChannelKey}"`;
+}
+
+type CrossChannelScheduleGuardInput = {
+  requestedVideoType: PublishQueueType;
+  expectedChannelKey?: string | null;
+  destination: {
+    id: number;
+    name: string;
+    platform: string;
+    channelKey: string | null | undefined;
+  };
+  content: {
+    id: string;
+    channelKey: string | null | undefined;
+    nicheId?: number | null;
+    contentProfileKey?: string | null;
+    formatType?: string | null;
+    title?: string | null;
+    topic?: string | null;
+    shortContent?: string | null;
+    script?: string | null;
+    topicFamily?: string | null;
+    promptVersions?: unknown;
+  };
+};
+
+function getCrossChannelScheduleError(input: CrossChannelScheduleGuardInput): string | null {
+  const contentChannelKey = resolveChannelKey(input.content.channelKey);
+  const destinationChannelKey = resolveChannelKey(input.destination.channelKey);
+  const expectedChannelKey = input.expectedChannelKey
+    ? resolveChannelKey(input.expectedChannelKey)
+    : null;
+
+  if (expectedChannelKey && contentChannelKey !== expectedChannelKey) {
+    return `Expected content channel "${expectedChannelKey}" nhưng content "${input.content.id}" thuộc "${contentChannelKey}"`;
+  }
+  if (expectedChannelKey && destinationChannelKey !== expectedChannelKey) {
+    return `Expected destination channel "${expectedChannelKey}" nhưng social_channel ${input.destination.id} thuộc "${destinationChannelKey}"`;
+  }
+
+  const ownershipError = getDestinationOwnershipError(
+    contentChannelKey,
+    destinationChannelKey,
+    input.destination.name,
+  );
+  if (ownershipError) return ownershipError;
+
+  const quotePolicy = input.destination.platform === "youtube" &&
+    (input.requestedVideoType === "quote" || input.content.formatType === "legacy_quote_short")
+      ? getYoutubeQuoteSchedulerPolicy(destinationChannelKey)
+      : null;
+
+  if (quotePolicy) {
+    const contentProfileKey = resolveContentProfileKey(input.content.contentProfileKey);
+    if (contentChannelKey !== quotePolicy.channelKey) {
+      return `Quote lane destination "${destinationChannelKey}" chỉ nhận content channel "${quotePolicy.channelKey}"`;
+    }
+    if (input.content.formatType !== quotePolicy.formatType) {
+      return `Quote lane destination "${destinationChannelKey}" chỉ nhận format "${quotePolicy.formatType}"`;
+    }
+    if (contentProfileKey !== "philosophy") {
+      return `Quote lane destination "${destinationChannelKey}" chỉ nhận content profile "philosophy"`;
+    }
+  }
+
+  const tangSauViolation = getTangSauIsolationViolation({
+    channelKey: contentChannelKey,
+    nicheId: input.content.nicheId,
+    contentProfileKey: input.content.contentProfileKey,
+    formatType: input.content.formatType,
+    title: input.content.title,
+    topic: input.content.topic,
+    shortContent: input.content.shortContent,
+    script: input.content.script,
+    topicFamily: input.content.topicFamily,
+    promptVersions: input.content.promptVersions,
+  });
+  if (tangSauViolation) {
+    return `${tangSauViolation.code}: ${tangSauViolation.hits.join(", ")}`;
+  }
+
+  return null;
+}
+
+export const _getCrossChannelScheduleError = getCrossChannelScheduleError;
+
+function getYouTubePublishGuardError(item: {
+  platform: string;
+  channelId: number;
+  channel: {
+    id: number;
+    name: string;
+    platform: string;
+    channelKey: string | null;
+    platformChannelId: string | null;
+    oauthClientConfigId?: number | null;
+    accessToken?: string | null;
+    refreshToken?: string | null;
+  };
+  content: {
+    id: string;
+    channelKey: string | null;
+  };
+}): string | null {
+  if (item.platform !== "youtube") return "youtube_guard_platform_mismatch";
+  if (!item.channelId || !item.channel?.id) return "youtube_guard_missing_social_channel_id";
+  if (item.channel.platform !== "youtube") return "youtube_guard_social_channel_platform_mismatch";
+  if (!item.channel.platformChannelId) return "youtube_guard_missing_platform_channel_id";
+  const ownershipError = getDestinationOwnershipError(
+    item.content.channelKey,
+    item.channel.channelKey,
+    item.channel.name,
+  );
+  if (ownershipError) return ownershipError;
+  if (!item.channel.accessToken && !item.channel.refreshToken) {
+    return "youtube_guard_missing_credential";
+  }
+  return null;
 }
 
 // ─── Facebook env-based connect ───────────────────────────────────────────
@@ -228,6 +416,8 @@ export type UploadQueueRow = {
   platformChannelId: string | null;
   platformAccountId: number | null;
   platformAccountName: string | null;
+  oauthClientConfigId: number | null;
+  oauthClientName: string | null;
   platform: string;
   videoType: string;
   title: string;
@@ -270,10 +460,19 @@ export async function getUploadQueueAction(filters?: {
     },
     with: {
       channel: {
-        columns: { name: true, platformAccountId: true, channelKey: true, platformChannelId: true },
+        columns: {
+          name: true,
+          platformAccountId: true,
+          channelKey: true,
+          platformChannelId: true,
+          oauthClientConfigId: true,
+        },
         with: {
           platformAccount: {
             columns: { displayName: true },
+          },
+          oauthClient: {
+            columns: { name: true },
           },
         },
       },
@@ -290,11 +489,13 @@ export async function getUploadQueueAction(filters?: {
         },
       },
     },
-    orderBy: (t, { asc, desc: d }) => [
-      asc(t.scheduledAt),
+    orderBy: (t, { desc: d }) => [
+      // DESC so upcoming queued rows (future scheduledAt) surface before old done/cancelled rows.
+      // Without this, old history fills the limit window and active rows are never returned.
+      d(t.scheduledAt),
       d(t.createdAt),
     ],
-    limit: filters?.limit ?? 100,
+    limit: filters?.limit ?? 300,
   });
 
   return rows.map((r) => {
@@ -313,6 +514,8 @@ export async function getUploadQueueAction(filters?: {
       platformChannelId: r.channel.platformChannelId,
       platformAccountId: r.channel.platformAccountId,
       platformAccountName: r.channel.platformAccount?.displayName ?? null,
+      oauthClientConfigId: r.channel.oauthClientConfigId,
+      oauthClientName: r.channel.oauthClient?.name ?? null,
       platform: r.platform,
       videoType: r.videoType,
       title: r.title,
@@ -448,6 +651,20 @@ export async function getUploadQueueStatsAction(): Promise<Record<string, number
   return counts;
 }
 
+export async function syncPhatPhapQueuePairsAction(input: {
+  from: Date;
+  to: Date;
+  contentId?: string | null;
+  apply?: boolean;
+}): Promise<PhatPhapQueueSyncResult> {
+  return executePhatPhapQueueSync({
+    from: input.from,
+    to: input.to,
+    contentId: input.contentId ?? null,
+    apply: input.apply ?? false,
+  });
+}
+
 // ─── Ready-to-publish videos ───────────────────────────────────────────────
 
 export type ReadyVideoRow = {
@@ -549,60 +766,6 @@ export async function getReadyVideosAction(): Promise<ReadyVideoRow[]> {
     ...quoteReady.map(r => ({ ...r, videoType: "quote" as const })),
     ...longReady.map(r => ({ ...r, videoType: "long" as const })),
   ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-}
-
-function findNextBulkSlot(
-  windowStart: string,
-  windowEnd: string,
-  intervalMin: number,
-  taken: number[],
-  notBefore?: Date,
-): Date | null {
-  const VN_OFFSET_MS = 7 * 60 * 60 * 1000;
-  const [sh, sm] = windowStart.split(":").map(Number);
-  const [eh, em] = windowEnd.split(":").map(Number);
-  const windowEndMin = eh * 60 + em;
-  const now = notBefore && notBefore.getTime() > Date.now()
-    ? new Date(notBefore.getTime() - 1000)
-    : new Date();
-  const nowVn = new Date(now.getTime() + VN_OFFSET_MS);
-
-  for (let day = 0; day < 14; day++) {
-    const baseVn = new Date(Date.UTC(
-      nowVn.getUTCFullYear(),
-      nowVn.getUTCMonth(),
-      nowVn.getUTCDate() + day,
-      0,
-      0,
-      0,
-      0,
-    ));
-
-    let startMin = sh * 60 + sm;
-    if (day === 0) {
-      const nowMin = nowVn.getUTCHours() * 60 + nowVn.getUTCMinutes();
-      if (nowMin >= startMin) {
-        startMin = Math.ceil((nowMin + 1) / intervalMin) * intervalMin;
-      }
-    }
-
-    for (let slotMin = startMin; slotMin <= windowEndMin; slotMin += intervalMin) {
-      const candidate = new Date(Date.UTC(
-        baseVn.getUTCFullYear(),
-        baseVn.getUTCMonth(),
-        baseVn.getUTCDate(),
-        Math.floor(slotMin / 60) - 7,
-        slotMin % 60,
-        0,
-        0,
-      ));
-      if (candidate.getTime() <= now.getTime()) continue;
-      const half = (intervalMin / 2) * 60_000;
-      const conflict = taken.some(t => Math.abs(t - candidate.getTime()) < half);
-      if (!conflict) return candidate;
-    }
-  }
-  return null;
 }
 
 export async function bulkScheduleAction(input: {
@@ -707,13 +870,18 @@ export async function bulkScheduleAction(input: {
         eq(socialChannels.platformChannelId, channel.platformChannelId),
       )
     : eq(uploadQueue.channelId, input.channelId);
+  // Include 'done' so recently-published slots aren't re-used when rescheduling.
+  // Scope to last 24 h — past-done rows before that window can't conflict with
+  // future candidates since findNextBulkSlot only picks slots > now.
+  const takenSince = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const existing = await db
     .select({ scheduledAt: uploadQueue.scheduledAt })
     .from(uploadQueue)
     .innerJoin(socialChannels, eq(uploadQueue.channelId, socialChannels.id))
     .where(and(
       destinationWhere,
-      inArray(uploadQueue.status, ["queued", "uploading"]),
+      inArray(uploadQueue.status, ["queued", "uploading", "done"]),
+      gte(uploadQueue.scheduledAt, takenSince),
     ));
   const taken = existing.map(r => new Date(r.scheduledAt).getTime());
   const existingForDestination = await db
@@ -723,7 +891,7 @@ export async function bulkScheduleAction(input: {
     .where(and(
       destinationWhere,
       eq(uploadQueue.videoType, input.videoType),
-      inArray(uploadQueue.status, ["queued", "uploading", "done"]),
+      inArray(uploadQueue.status, ["queued", "uploading", "done", "cancelled"]),
       input.contentIds?.length ? inArray(uploadQueue.contentId, input.contentIds) : undefined,
     ));
   const existingContentIds = new Set(existingForDestination.map((row) => row.contentId));
@@ -740,6 +908,8 @@ export async function bulkScheduleAction(input: {
       longYoutubeDescription: true,
       contentProfileKey: true,
       channelKey: true,
+      nicheId: true,
+      formatType: true,
     },
   });
   const contentMap = new Map(contents.map(c => [c.id, c]));
@@ -752,7 +922,12 @@ export async function bulkScheduleAction(input: {
       skipped++;
       continue;
     }
-    const slot = findNextBulkSlot(input.windowStart, input.windowEnd, input.intervalMin, taken);
+    const slot = findNextAvailablePublishSlot({
+      windowStart: input.windowStart,
+      windowEnd: input.windowEnd,
+      intervalMin: input.intervalMin,
+      taken,
+    });
     if (!slot) { skipped++; continue; }
 
     const content = contentMap.get(target.id);
@@ -761,12 +936,28 @@ export async function bulkScheduleAction(input: {
       skipped++;
       continue;
     }
-    const ownershipError = getDestinationOwnershipError(
-      content?.channelKey,
-      destinationChannelKey,
-      channel.name,
-    );
-    if (ownershipError) {
+    const crossChannelError = content
+      ? getCrossChannelScheduleError({
+          requestedVideoType: input.videoType,
+          destination: {
+            id: channel.id,
+            name: channel.name,
+            platform: channel.platform,
+            channelKey: destinationChannelKey,
+          },
+          content: {
+            id: target.id,
+            channelKey: content.channelKey,
+            nicheId: content.nicheId,
+            contentProfileKey: content.contentProfileKey,
+            formatType: content.formatType,
+          },
+        })
+      : null;
+    if (crossChannelError) {
+      console.error(
+        `[cross_channel_guard] bulk_schedule_block contentId=${target.id} destinationChannelId=${channel.id} platform=${channel.platform} requestedVideoType=${input.videoType} error=${crossChannelError}`,
+      );
       skipped++;
       continue;
     }
@@ -914,13 +1105,14 @@ export async function rebalanceQueuedUploadsAction(platform = "youtube"): Promis
             new Date().getTime(),
           ))
         : new Date(new Date().getTime());
-      const slot = findNextBulkSlot(
-        cfg.windowStart,
-        cfg.windowEnd,
+      const slot = findNextAvailablePublishSlot({
+        windowStart: cfg.windowStart,
+        windowEnd: cfg.windowEnd,
         intervalMin,
         taken,
         notBefore,
-      );
+        slotOffsetMinutes: getSlotOffsetMinutes(new Date(row.scheduledAt), intervalMin),
+      });
       if (!slot) continue;
 
       if (slot.getTime() !== new Date(row.scheduledAt).getTime()) {
@@ -1007,7 +1199,7 @@ function normalizeAutoScheduleSettings(settings: AutoScheduleSettings): AutoSche
   const longLegacy = normalizeVideoSetting(settings.long, DEFAULT_AUTO_SCHEDULE.long, 120);
   const shortDestinations = normalizeDestinationList(settings.shortDestinations, DEFAULT_AUTO_SCHEDULE.short, 60);
   const longDestinations = normalizeDestinationList(settings.longDestinations, DEFAULT_AUTO_SCHEDULE.long, 120);
-  const quoteFallback = { enabled: false, channelId: 0, windowStart: "08:00", windowEnd: "23:00", intervalMin: 60, privacyStatus: "public" as const };
+  const quoteFallback = { enabled: false, channelId: 0, windowStart: "06:00", windowEnd: "22:00", intervalMin: 60, privacyStatus: "public" as const };
   const quoteDestinations = normalizeDestinationList(settings.quoteDestinations, quoteFallback, 60);
   const mergedShort = shortDestinations.length > 0
     ? shortDestinations
@@ -1024,7 +1216,130 @@ function normalizeAutoScheduleSettings(settings: AutoScheduleSettings): AutoSche
   };
 }
 
+type ChannelPublishConfigRecord = Record<string, {
+  publishingEnabled: boolean;
+  autoScheduleEnabled: boolean;
+  allowLegacyEnvFallback: boolean;
+  shortDestinations: AutoScheduleVideoSetting[];
+  longDestinations: AutoScheduleVideoSetting[];
+  quoteDestinations: AutoScheduleVideoSetting[];
+}>;
+
+async function loadChannelPublishConfigsRecord(): Promise<ChannelPublishConfigRecord> {
+  const row = await db.query.appConfig.findFirst({
+    where: eq(appConfig.key, CHANNEL_PUBLISH_CONFIGS_KEY),
+  });
+  if (!row?.value) return {};
+  try {
+    const parsed = JSON.parse(row.value) as ChannelPublishConfigRecord;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function buildUiSettingsFromChannelPublishConfigs(
+  configs: ChannelPublishConfigRecord,
+): AutoScheduleSettings {
+  const shortDestinations = Object.values(configs).flatMap((config) => config.shortDestinations ?? []);
+  const longDestinations = Object.values(configs).flatMap((config) => config.longDestinations ?? []);
+  const quoteDestinations = Object.values(configs).flatMap((config) => config.quoteDestinations ?? []);
+  return normalizeAutoScheduleSettings({
+    short: shortDestinations[0] ?? DEFAULT_AUTO_SCHEDULE.short,
+    long: longDestinations[0] ?? DEFAULT_AUTO_SCHEDULE.long,
+    shortDestinations,
+    longDestinations,
+    quoteDestinations,
+  });
+}
+
+async function buildChannelPublishConfigsRecordFromUiSettings(
+  settings: AutoScheduleSettings,
+): Promise<ChannelPublishConfigRecord> {
+  const channelIds = [
+    ...settings.shortDestinations.map((destination) => destination.channelId),
+    ...settings.longDestinations.map((destination) => destination.channelId),
+    ...settings.quoteDestinations.map((destination) => destination.channelId),
+  ].filter((channelId) => channelId > 0);
+
+  const channels = channelIds.length > 0
+    ? await db.query.socialChannels.findMany({
+        where: inArray(socialChannels.id, channelIds),
+        columns: { id: true, channelKey: true },
+      })
+    : [];
+  const channelKeyById = new Map(
+    channels.map((channel) => [channel.id, normalizeChannelKey(channel.channelKey)]),
+  );
+  const existing = await loadChannelPublishConfigsRecord();
+  const next: ChannelPublishConfigRecord = { ...existing };
+
+  const upsertDestinations = (
+    destinationType: "shortDestinations" | "longDestinations" | "quoteDestinations",
+    destinations: AutoScheduleVideoSetting[],
+  ) => {
+    for (const destination of destinations) {
+      const channelKey = channelKeyById.get(destination.channelId);
+      if (!channelKey) continue;
+      const base = next[channelKey] ?? {
+        publishingEnabled: getChannelDefinition(channelKey).publishingEnabled,
+        autoScheduleEnabled: getChannelDefinition(channelKey).autoScheduleEnabled,
+        allowLegacyEnvFallback: getChannelDefinition(channelKey).allowLegacyEnvFallback,
+        shortDestinations: [],
+        longDestinations: [],
+        quoteDestinations: [],
+      };
+      next[channelKey] = {
+        ...base,
+        [destinationType]: [
+          ...base[destinationType].filter((item) => item.channelId !== destination.channelId),
+          destination,
+        ],
+      };
+    }
+  };
+
+  for (const channelKey of [DEFAULT_CHANNEL_KEY, "tang_sau"] as const) {
+    const base = next[channelKey] ?? {
+      publishingEnabled: getChannelDefinition(channelKey).publishingEnabled,
+      autoScheduleEnabled: getChannelDefinition(channelKey).autoScheduleEnabled,
+      allowLegacyEnvFallback: getChannelDefinition(channelKey).allowLegacyEnvFallback,
+      shortDestinations: [],
+      longDestinations: [],
+      quoteDestinations: [],
+    };
+    next[channelKey] = {
+      ...base,
+      shortDestinations: [],
+      longDestinations: [],
+      quoteDestinations: [],
+    };
+  }
+
+  upsertDestinations("shortDestinations", settings.shortDestinations);
+  upsertDestinations("longDestinations", settings.longDestinations);
+  upsertDestinations("quoteDestinations", settings.quoteDestinations);
+
+  for (const [channelKey, config] of Object.entries(next)) {
+    const hasEnabledDestination = [
+      ...config.shortDestinations,
+      ...config.longDestinations,
+      ...config.quoteDestinations,
+    ].some((destination) => destination.enabled && destination.channelId > 0);
+    next[channelKey] = {
+      ...config,
+      autoScheduleEnabled: hasEnabledDestination,
+    };
+  }
+
+  return next;
+}
+
 export async function getAutoScheduleSettingsAction(): Promise<AutoScheduleSettings> {
+  const channelConfigs = await loadChannelPublishConfigsRecord();
+  if (Object.keys(channelConfigs).length > 0) {
+    return buildUiSettingsFromChannelPublishConfigs(channelConfigs);
+  }
   const row = await db.query.appConfig.findFirst({ where: eq(appConfig.key, "auto_schedule_settings") });
   if (!row) return DEFAULT_AUTO_SCHEDULE;
   try { return normalizeAutoScheduleSettings({ ...DEFAULT_AUTO_SCHEDULE, ...JSON.parse(row.value) } as AutoScheduleSettings); }
@@ -1033,9 +1348,23 @@ export async function getAutoScheduleSettingsAction(): Promise<AutoScheduleSetti
 
 export async function saveAutoScheduleSettingsAction(settings: AutoScheduleSettings): Promise<{ success: boolean }> {
   const normalized = normalizeAutoScheduleSettings(settings);
+  const channelPublishConfigs = await buildChannelPublishConfigsRecordFromUiSettings(normalized);
   await db.insert(appConfig)
     .values({ key: "auto_schedule_settings", value: JSON.stringify(normalized), updatedAt: new Date() })
     .onConflictDoUpdate({ target: appConfig.key, set: { value: JSON.stringify(normalized), updatedAt: new Date() } });
+  await db.insert(appConfig)
+    .values({
+      key: CHANNEL_PUBLISH_CONFIGS_KEY,
+      value: JSON.stringify(channelPublishConfigs),
+      updatedAt: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: appConfig.key,
+      set: {
+        value: JSON.stringify(channelPublishConfigs),
+        updatedAt: new Date(),
+      },
+    });
   await rebalanceQueuedUploadsAction("youtube");
   await rebalanceQueuedUploadsAction("facebook");
   return { success: true };
@@ -1093,8 +1422,8 @@ function getFallbackDestinationSetting(
     return {
       enabled: false,
       channelId: 0,
-      windowStart: "08:00",
-      windowEnd: "23:00",
+      windowStart: "06:00",
+      windowEnd: "22:00",
       intervalMin: 60,
       privacyStatus: "public",
     };
@@ -1103,15 +1432,481 @@ function getFallbackDestinationSetting(
   return settings.short;
 }
 
+/**
+ * Result codes returned by insertPhatPhapCampaignFbRow.
+ * Used by callers and tests to assert which path was taken.
+ */
+export type PhatPhapCampaignFbResult =
+  | "inserted"               // FB row successfully inserted at campaign slot
+  | "wait_for_yt_slot"       // no queued YT short row yet; skip this pass, next cron will retry
+  | "skip_dup"               // FB row already exists for this content/channel/type
+  | "skip_slot_collision"    // a different content item already occupies (channel, slot, type)
+  | "skip_no_content";       // content_id not found in content_generations
+
+const PHAT_PHAP_CAMPAIGN_QUEUE_STATUSES = [
+  "queued",
+  "uploading",
+  "done",
+] as const;
+
+function isPhatPhapCampaignQueueItem(input: {
+  channelKey: string | null | undefined;
+  platform: string;
+  videoType: string;
+}): boolean {
+  return resolveChannelKey(input.channelKey) === DEFAULT_CHANNEL_KEY && (
+    (input.platform === "youtube" && input.videoType === "short") ||
+    (input.platform === "facebook" && (input.videoType === "short" || input.videoType === "quote"))
+  );
+}
+
+async function findAlignedPhatPhapPrimaryShortRow(input: {
+  contentId: string;
+  quoteScheduledAt: Date;
+}): Promise<{ id: string; platform: string; scheduledAt: Date; status: string } | null> {
+  const primarySlot = new Date(input.quoteScheduledAt.getTime() - 5 * 60_000);
+  const row = await db.query.uploadQueue.findFirst({
+    where: and(
+      eq(uploadQueue.contentId, input.contentId),
+      eq(uploadQueue.videoType, "short"),
+      eq(uploadQueue.scheduledAt, primarySlot),
+      inArray(uploadQueue.status, [...PHAT_PHAP_CAMPAIGN_QUEUE_STATUSES]),
+    ),
+    columns: {
+      id: true,
+      platform: true,
+      scheduledAt: true,
+      status: true,
+    },
+    orderBy: [desc(uploadQueue.createdAt)],
+  });
+
+  return row
+    ? {
+        id: row.id,
+        platform: row.platform,
+        scheduledAt: new Date(row.scheduledAt),
+        status: row.status,
+      }
+    : null;
+}
+
+// Finds an HH:00 anchor (HH:05 for the quote sidecar) where EVERY lane a phat_phap content
+// item actually occupies (YouTube short, Facebook short/reel, Facebook quote sidecar) is
+// simultaneously collision-free — not just the single lane that triggered the cooldown
+// check. A candidate that is free on one lane but occupied on a sibling lane is rejected
+// and the search continues forward. This is the fix for the root cause where
+// findNextAvailablePublishSlot was only ever asked about the triggering row's own lane.
+async function findFullLaneSafePhatPhapAnchor(input: {
+  contentId: string;
+  notBefore: Date;
+  windowStart: string;
+  windowEnd: string;
+  intervalMin: number;
+  lanes: Array<{ platform: "youtube" | "facebook"; videoType: "short" | "quote"; channelId: number; platformChannelId: string | null }>;
+}): Promise<{ anchor: Date | null; reason: string | null }> {
+  const takenByLane = await Promise.all(
+    input.lanes.map((lane) =>
+      getTakenUploadSlotsForDestination({
+        channelId: lane.channelId,
+        platform: lane.platform,
+        platformChannelId: lane.platformChannelId,
+        videoType: lane.videoType,
+      }),
+    ),
+  );
+
+  return pickFullLaneSafeAnchor({
+    notBefore: input.notBefore,
+    windowStart: input.windowStart,
+    windowEnd: input.windowEnd,
+    intervalMin: input.intervalMin,
+    lanes: input.lanes.map((lane, index) => ({
+      videoType: lane.videoType,
+      takenMs: takenByLane[index]
+        .filter((row) => row.contentId !== input.contentId)
+        .map((row) => row.scheduledAt.getTime()),
+    })),
+  });
+}
+
+type PhatPhapCampaignSyncResult = {
+  moved: Array<{ id: string; platform: string; videoType: string; scheduledAt: string }>;
+  blocked: boolean;
+  reason: string | null;
+};
+
+async function syncQueuedPhatPhapCampaignRows(input: {
+  contentId: string;
+  anchorShortScheduledAt: Date;
+  errorMessage: string;
+  windowStart?: string;
+  windowEnd?: string;
+  intervalMin?: number;
+}): Promise<PhatPhapCampaignSyncResult> {
+  const rows = await db.query.uploadQueue.findMany({
+    where: and(
+      eq(uploadQueue.contentId, input.contentId),
+      inArray(uploadQueue.status, ["queued"]),
+      inArray(uploadQueue.platform, ["youtube", "facebook"]),
+      inArray(uploadQueue.videoType, ["short", "quote"]),
+    ),
+    columns: {
+      id: true,
+      platform: true,
+      videoType: true,
+      scheduledAt: true,
+      channelId: true,
+    },
+    with: {
+      channel: { columns: { platformChannelId: true } },
+    },
+  });
+
+  if (rows.length === 0) return { moved: [], blocked: false, reason: null };
+
+  const lanes = rows.map((row) => ({
+    platform: row.platform as "youtube" | "facebook",
+    videoType: row.videoType as "short" | "quote",
+    channelId: row.channelId,
+    platformChannelId: row.channel?.platformChannelId ?? null,
+  }));
+
+  const { anchor, reason } = await findFullLaneSafePhatPhapAnchor({
+    contentId: input.contentId,
+    notBefore: input.anchorShortScheduledAt,
+    windowStart: input.windowStart ?? "06:00",
+    windowEnd: input.windowEnd ?? "22:00",
+    intervalMin: input.intervalMin ?? 60,
+    lanes,
+  });
+
+  if (!anchor) {
+    return { moved: [], blocked: true, reason };
+  }
+
+  const quoteScheduledAt = new Date(anchor.getTime() + 5 * 60_000);
+  const moved: Array<{ id: string; platform: string; videoType: string; scheduledAt: string }> = [];
+
+  for (const row of rows) {
+    const nextScheduledAt = row.videoType === "quote" ? quoteScheduledAt : anchor;
+    if (new Date(row.scheduledAt).getTime() === nextScheduledAt.getTime()) continue;
+
+    await db.update(uploadQueue).set({
+      scheduledAt: nextScheduledAt,
+      errorMessage: input.errorMessage,
+      updatedAt: new Date(),
+    }).where(eq(uploadQueue.id, row.id));
+
+    moved.push({
+      id: row.id,
+      platform: row.platform,
+      videoType: row.videoType,
+      scheduledAt: nextScheduledAt.toISOString(),
+    });
+  }
+
+  return { moved, blocked: false, reason: null };
+}
+
+/**
+ * Insert a single Facebook upload_queue row anchored to the phat_phap campaign slot.
+ *
+ * The campaign slot is read from the ALREADY-CREATED queued YouTube short row for
+ * this content. This ensures FB short = YT scheduled_at, FB quote = YT + 5 min.
+ *
+ * When the YouTube row does not exist yet (e.g. because the destination list is
+ * processed Facebook-first, or the YT bulkScheduleAction was skipped this pass),
+ * the function returns "wait_for_yt_slot" and inserts NOTHING.
+ * The next cron invocation will call autoScheduleVideoAction again and the FB row
+ * will be inserted once the YT row is present.
+ *
+ * NEVER falls back to independent next-available-FB-slot scheduling — that would
+ * recreate the YT/FB drift bug this policy was designed to eliminate.
+ */
+async function insertPhatPhapCampaignFbRow(
+  contentId: string,
+  fbChannelId: number,
+  videoType: "short" | "quote",
+): Promise<PhatPhapCampaignFbResult> {
+  // 1. Read campaign slot from the queued YouTube short row.
+  //    If absent: signal WAIT_FOR_YT_SLOT — do not fall back to independent scheduling.
+  const ytRow = await db.query.uploadQueue.findFirst({
+    where: and(
+      eq(uploadQueue.contentId, contentId),
+      eq(uploadQueue.platform, "youtube"),
+      eq(uploadQueue.videoType, "short"),
+      inArray(uploadQueue.status, ["queued", "uploading"]),
+    ),
+    orderBy: [desc(uploadQueue.createdAt)],
+    columns: { scheduledAt: true },
+  });
+
+  if (!ytRow) {
+    // Do NOT fall back to bulkScheduleAction / independent FB slot.
+    // The next cron pass will re-enter autoScheduleVideoAction and the YT duplicate
+    // guard will skip YT (already queued) while FB will find the YT row and insert.
+    console.warn(
+      `[phatPhapCampaign] WAIT_FOR_YT_SLOT fb/${videoType} contentId=${contentId} — no queued YT short row; will retry next cron pass`,
+    );
+    return "wait_for_yt_slot";
+  }
+
+  const campaignSlot = new Date(ytRow.scheduledAt);
+  const fbSlot =
+    videoType === "quote"
+      ? new Date(campaignSlot.getTime() + 5 * 60_000)
+      : campaignSlot;
+
+  // 2a. Content-level duplicate guard (same content, same channel, same type)
+  const existing = await db.query.uploadQueue.findFirst({
+    where: and(
+      eq(uploadQueue.contentId, contentId),
+      eq(uploadQueue.channelId, fbChannelId),
+      eq(uploadQueue.videoType, videoType),
+      inArray(uploadQueue.status, ["queued", "uploading", "done", "cancelled"]),
+    ),
+    columns: { id: true },
+  });
+  if (existing) {
+    console.log(
+      `[phatPhapCampaign] SKIP dup fb/${videoType} contentId=${contentId} existingId=${existing.id}`,
+    );
+    return "skip_dup";
+  }
+
+  // 2b. Slot-level collision guard: prevent a different content item from
+  //     landing on the same (channel, scheduledAt, videoType) slot.
+  //     This catches the case where multiple content items' YT rows all share
+  //     the same campaign slot, which would otherwise produce N FB rows at
+  //     the same time (the root cause of the 2026-06-15 overposting incident).
+  const slotCollision = await db.query.uploadQueue.findFirst({
+    where: and(
+      eq(uploadQueue.channelId, fbChannelId),
+      eq(uploadQueue.videoType, videoType),
+      eq(uploadQueue.scheduledAt, fbSlot),
+      inArray(uploadQueue.status, ["queued", "uploading", "done"]),
+    ),
+    columns: { id: true, contentId: true },
+  });
+  if (slotCollision && slotCollision.contentId !== contentId) {
+    console.warn(
+      `[phatPhapCampaign] SKIP slot_collision fb/${videoType} contentId=${contentId} — slot ${fbSlot.toISOString()} already occupied by ${slotCollision.contentId}`,
+    );
+    return "skip_slot_collision";
+  }
+
+  // 3. Fetch content metadata for title/description
+  const content = await db.query.contentGenerations.findFirst({
+    where: eq(contentGenerations.id, contentId),
+    columns: {
+      id: true,
+      topic: true,
+      nicheId: true,
+      nicheName: true,
+      shortContent: true,
+      longContent: true,
+      longYoutubeDescription: true,
+      contentProfileKey: true,
+      channelKey: true,
+      formatType: true,
+      promptVersions: true,
+    },
+  });
+  if (!content) {
+    console.warn(
+      `[phatPhapCampaign] SKIP fb/${videoType} — content not found contentId=${contentId}`,
+    );
+    return "skip_no_content";
+  }
+
+  const fbChannel = await db.query.socialChannels.findFirst({
+    where: eq(socialChannels.id, fbChannelId),
+    columns: {
+      id: true,
+      name: true,
+      platform: true,
+      channelKey: true,
+    },
+  });
+  if (!fbChannel) {
+    console.warn(
+      `[cross_channel_guard] skip_schedule_missing_destination contentId=${contentId} channelId=${fbChannelId}`,
+    );
+    return "skip_no_content";
+  }
+  const crossChannelError = getCrossChannelScheduleError({
+    requestedVideoType: videoType,
+    expectedChannelKey: content.channelKey,
+    destination: fbChannel,
+    content: {
+      id: content.id,
+      channelKey: content.channelKey,
+      nicheId: content.nicheId,
+      contentProfileKey: content.contentProfileKey,
+      formatType: content.formatType,
+    },
+  });
+  if (crossChannelError) {
+    console.error(
+      `[cross_channel_guard] skip_schedule contentId=${contentId} channelId=${fbChannelId} platform=facebook videoType=${videoType} error=${crossChannelError}`,
+    );
+    return "skip_no_content";
+  }
+
+  const topic = content.topic ?? "";
+  let quoteArtifact: QuoteArtifactMetadata | null = null;
+  if (videoType === "quote") {
+    const resolvedQuote = await resolveFacebookQuoteArtifact({
+      topic,
+      shortContent: content.shortContent,
+      contentProfileKey: content.contentProfileKey,
+      channelKey: content.channelKey,
+      nicheName: content.nicheName,
+      sourceContentId: contentId,
+      sourceFormatType: content.formatType ?? null,
+    });
+    quoteArtifact = resolvedQuote.metadata;
+    await db.update(contentGenerations).set({
+      promptVersions: mergePromptVersions(content.promptVersions, {
+        quote: createPromptVersionEntry("quote", {
+          model: resolvedQuote.usage?.model ?? null,
+          stage: "quote",
+          mode: "facebook_quote_photo",
+          details: quoteArtifact as unknown as Record<string, unknown>,
+        }),
+      }),
+    }).where(eq(contentGenerations.id, contentId));
+    if (resolvedQuote.usage) {
+      await logApiUsage({
+        model: resolvedQuote.usage.model,
+        purpose: "quote_text",
+        inputTokens: resolvedQuote.usage.inputTokens,
+        outputTokens: resolvedQuote.usage.outputTokens,
+        contentGenerationId: contentId,
+        metadata: {
+          channelKey: content.channelKey,
+          platform: "facebook",
+          videoType: "quote",
+          quoteSourceType: quoteArtifact.quoteSourceType,
+          quoteStyle: quoteArtifact.quoteStyle,
+          kinetic: quoteArtifact.kinetic,
+        },
+      });
+    }
+  }
+  const metadata =
+    videoType === "quote"
+      ? {
+          title: (quoteArtifact?.quoteText ?? buildFacebookQuoteText({
+            topic,
+            shortContent: content.shortContent,
+            contentProfileKey: content.contentProfileKey,
+          })).slice(0, 100),
+          description: buildDefaultVideoDescription({
+            platform: "facebook",
+            contentType: "quote",
+            topic,
+            nicheName: content.nicheName,
+            shortContent: content.shortContent,
+            longContent: content.longContent,
+            longYoutubeDescription: content.longYoutubeDescription,
+            contentProfileKey: content.contentProfileKey,
+            quoteText: quoteArtifact?.quoteText,
+          }),
+          tags: [] as string[],
+        }
+      : {
+          title: buildDefaultVideoTitle({
+            platform: "facebook",
+            contentType: "short",
+            topic,
+            contentProfileKey: content.contentProfileKey,
+            shortContent: content.shortContent,
+          }),
+          description: buildDefaultVideoDescription({
+            platform: "facebook",
+            contentType: "short",
+            topic,
+            nicheName: content.nicheName,
+            shortContent: content.shortContent,
+            longContent: content.longContent,
+            longYoutubeDescription: content.longYoutubeDescription,
+            contentProfileKey: content.contentProfileKey,
+          }),
+          tags: [] as string[],
+        };
+
+  // 4. Log intended row before insert (dry-run preview)
+  const slotLabel =
+    videoType === "quote"
+      ? `campaign_slot+5min (${fbSlot.toISOString()})`
+      : `campaign_slot (${fbSlot.toISOString()})`;
+  console.log(
+    `[phatPhapCampaign] INSERT fb/${videoType} contentId=${contentId} channelId=${fbChannelId} scheduledAt=${slotLabel}` +
+      `${quoteArtifact ? ` quoteSourceType=${quoteArtifact.quoteSourceType}` : ""}`,
+  );
+
+  // 5. Insert the row
+  await db.insert(uploadQueue).values({
+    contentId,
+    channelId: fbChannelId,
+    platform: "facebook",
+    videoType,
+    title: metadata.title,
+    description: metadata.description,
+    tags: metadata.tags,
+    privacyStatus: "public",
+    scheduledAt: fbSlot,
+    status: "queued",
+  });
+
+  return "inserted";
+}
+
+/**
+ * @internal — test-only re-export of insertPhatPhapCampaignFbRow.
+ * Allows integration tests to exercise the wait-for-yt-slot path directly
+ * without routing through autoScheduleVideoAction.
+ * Do NOT call this from production code.
+ */
+export const _phatPhapCampaignFbRow = insertPhatPhapCampaignFbRow;
+
 export async function autoScheduleVideoAction(
   contentId: string,
   videoType: PublishQueueType,
 ): Promise<void> {
   const content = await db.query.contentGenerations.findFirst({
     where: eq(contentGenerations.id, contentId),
-    columns: { channelKey: true },
+    columns: {
+      id: true,
+      channelKey: true,
+      nicheId: true,
+      topic: true,
+      shortContent: true,
+      script: true,
+      experimentVariant: true,
+      formatType: true,
+      contentProfileKey: true,
+      topicFamily: true,
+      promptVersions: true,
+    },
   });
   if (!content) return;
+
+  // Block legacy Buddhist CTA content from being re-queued by auto-schedule.
+  // requireShortCta was disabled for phat_phap on 2026-06-07; old HOOK_V1/null
+  // era items still carry the baked subscriber CTA in short_content.
+  if (content.channelKey === "phat_phap" && content.shortContent) {
+    const hasLegacyCta =
+      content.shortContent.includes("nhấn thích") ||
+      content.shortContent.includes("theo dõi kênh") ||
+      content.shortContent.includes("đăng ký");
+    if (hasLegacyCta) {
+      console.log(`[autoSchedule] blocked_legacy_buddhist_cta contentId=${contentId}`);
+      return;
+    }
+  }
 
   const publishSafety = await getChannelPublishSafety(content.channelKey, videoType, {
     requireConfiguredDestinations: true,
@@ -1130,26 +1925,72 @@ export async function autoScheduleVideoAction(
       where: eq(socialChannels.id, cfg.channelId),
     });
     if (!configuredChannel) continue;
-    if (getDestinationOwnershipError(content.channelKey, configuredChannel.channelKey, configuredChannel.name)) {
+    const crossChannelError = getCrossChannelScheduleError({
+      requestedVideoType: videoType,
+      expectedChannelKey: publishSafety.channelKey,
+      destination: {
+        id: configuredChannel.id,
+        name: configuredChannel.name,
+        platform: configuredChannel.platform,
+        channelKey: configuredChannel.channelKey,
+      },
+      content: {
+        id: content.id,
+        channelKey: content.channelKey,
+        nicheId: content.nicheId,
+        contentProfileKey: content.contentProfileKey,
+        formatType: content.formatType,
+        title: content.topic,
+        topic: content.topic,
+        shortContent: content.shortContent,
+        script: content.script,
+        topicFamily: content.topicFamily,
+        promptVersions: content.promptVersions,
+      },
+    });
+    if (crossChannelError) {
+      console.error(
+        `[cross_channel_guard] auto_schedule_block contentId=${content.id} destinationChannelId=${configuredChannel.id} platform=${configuredChannel.platform} requestedVideoType=${videoType} error=${crossChannelError}`,
+      );
       continue;
     }
     if (configuredChannel.platform === "facebook" && videoType === "long") continue;
-    if (configuredChannel.platform === "youtube" && videoType === "quote") continue;
+    // legacy_quote_short is a music-backed MP4 Short — eligible for YouTube as video_type='short'.
+    // Plain quote photo posts (non-video formats) remain blocked from YouTube.
+    const effectiveVideoType: PublishQueueType =
+      configuredChannel.platform === "youtube" &&
+      videoType === "quote" &&
+      content.formatType === "legacy_quote_short"
+        ? "short"
+        : videoType;
+    if (configuredChannel.platform === "youtube" && effectiveVideoType === "quote") continue;
     const isExceeded = !!(configuredChannel.quotaExceededUntil && configuredChannel.quotaExceededUntil > new Date());
     if (configuredChannel.platform === "youtube" && isExceeded && configuredChannel.platformChannelId) {
       const altId = await findAvailableYouTubeChannel(cfg.channelId, configuredChannel.platformChannelId);
       if (altId) channelId = altId;
     }
 
-    await bulkScheduleAction({
-      videoType,
-      channelId,
-      windowStart: cfg.windowStart,
-      windowEnd: cfg.windowEnd,
-      intervalMin: cfg.intervalMin,
-      privacyStatus: cfg.privacyStatus,
-      contentIds: [contentId],
-    });
+    // phat_phap same-slot campaign policy: FB rows are anchored to the YT short
+    // campaign slot rather than independently scheduled.
+    // - FB short row  → same scheduled_at as the YT short row
+    // - FB quote row  → YT short scheduled_at + 5 min
+    if (
+      content.channelKey === "phat_phap" &&
+      configuredChannel.platform === "facebook" &&
+      (effectiveVideoType === "short" || effectiveVideoType === "quote")
+    ) {
+      await insertPhatPhapCampaignFbRow(contentId, channelId, effectiveVideoType);
+    } else {
+      await bulkScheduleAction({
+        videoType: effectiveVideoType,
+        channelId,
+        windowStart: cfg.windowStart,
+        windowEnd: cfg.windowEnd,
+        intervalMin: cfg.intervalMin,
+        privacyStatus: cfg.privacyStatus,
+        contentIds: [contentId],
+      });
+    }
   }
 }
 
@@ -1199,14 +2040,28 @@ export async function processUploadQueueAction(input?: string | {
   dryRun?: boolean;
   allowUpload?: boolean;
   source?: "cron" | "scheduler_job" | "manual" | "script" | "verify";
+  runId?: string;
+  job?: string;
 }): Promise<{
   processed: number;
   results: UploadProcessResult[];
 }> {
+  type EnrichedDueCandidate = {
+    item: typeof dueCandidates[number];
+    channelKey: string;
+    overdueMinutes: number;
+    staleThresholdMinutes: number | null;
+    staleGroupKey: string | null;
+    isStale: boolean;
+  };
+
   const options = typeof input === "string"
     ? { platformFilter: input }
     : (input ?? {});
   const platformFilter = options.platformFilter;
+  const runId = options.runId ?? crypto.randomUUID();
+  const source = options.source ?? "manual";
+  const job = options.job ?? null;
   const dryRun = options.dryRun === true || (
     options.allowUpload !== true &&
     options.source != null &&
@@ -1234,10 +2089,35 @@ export async function processUploadQueueAction(input?: string | {
     limit: 25,
   });
 
-  const dueFacebookItems = dueCandidates.filter(
-    (item) =>
+  const thresholdCache = new Map<string, number | null>();
+  async function resolveThreshold(channelKey: string, platform: string): Promise<number | null> {
+    const cacheKey = `${channelKey}:${platform}`;
+    if (thresholdCache.has(cacheKey)) return thresholdCache.get(cacheKey) ?? null;
+    const threshold = await getStaleBacklogThresholdMinutes(channelKey, platform);
+    thresholdCache.set(cacheKey, threshold);
+    return threshold;
+  }
+
+  const enrichedCandidates: EnrichedDueCandidate[] = [];
+  for (const item of dueCandidates) {
+    const channelKey = resolveChannelKey(item.channel.channelKey);
+    const overdueMinutes = getOverdueMinutes(new Date(item.scheduledAt), new Date());
+    const staleThresholdMinutes = await resolveThreshold(channelKey, item.platform);
+    const staleGroupKey = staleThresholdMinutes != null ? `${channelKey}:${item.platform}` : null;
+    enrichedCandidates.push({
+      item,
+      channelKey,
+      overdueMinutes,
+      staleThresholdMinutes,
+      staleGroupKey,
+      isStale: staleThresholdMinutes != null && overdueMinutes >= staleThresholdMinutes,
+    });
+  }
+
+  const dueFacebookItems = enrichedCandidates.filter(
+    ({ item, channelKey }) =>
       item.platform === "facebook" &&
-      resolveChannelKey(item.channel.channelKey) === DEFAULT_CHANNEL_KEY,
+      channelKey === DEFAULT_CHANNEL_KEY,
   );
   let facebookPreflightBlocked = false;
   if (dueFacebookItems.length > 0) {
@@ -1249,7 +2129,7 @@ export async function processUploadQueueAction(input?: string | {
         ? "Facebook token hết hạn hoặc thiếu quyền. Queue đang tạm hoãn chờ cập nhật token."
         : `Facebook chưa sẵn sàng: ${health.message}`;
       const affectedChannels = new Set<number>();
-      for (const item of dueFacebookItems) {
+      for (const { item } of dueFacebookItems) {
         if (affectedChannels.has(item.channelId)) continue;
         affectedChannels.add(item.channelId);
         await db.update(socialChannels).set({
@@ -1261,20 +2141,83 @@ export async function processUploadQueueAction(input?: string | {
       }
     }
   }
-  const due = [];
-  const platformsThisRun = new Set<string>();
-  for (const item of dueCandidates) {
+  const due: EnrichedDueCandidate[] = [];
+  const candidatesByPlatform = new Map<string, EnrichedDueCandidate[]>();
+  for (const candidate of enrichedCandidates) {
+    const { item, channelKey } = candidate;
     if (
       facebookPreflightBlocked &&
       item.platform === "facebook" &&
-      resolveChannelKey(item.channel.channelKey) === DEFAULT_CHANNEL_KEY
+      channelKey === DEFAULT_CHANNEL_KEY
     ) continue;
-    // One upload per platform per cron run. OAuth-client rotation still works
-    // because alternate credentials keep platform="youtube".
-    if (platformsThisRun.has(item.platform)) continue;
-    platformsThisRun.add(item.platform);
-    due.push(item);
+    const list = candidatesByPlatform.get(item.platform) ?? [];
+    list.push(candidate);
+    candidatesByPlatform.set(item.platform, list);
   }
+
+  for (const [platform, candidates] of candidatesByPlatform.entries()) {
+    const preferred = candidates.find((candidate) => !candidate.isStale) ?? candidates[0];
+    due.push(preferred);
+
+    const staleCandidates = candidates.filter((candidate) => candidate.isStale);
+    if (staleCandidates.length > 0) {
+      const staleGroupKey = preferred.staleGroupKey
+        ?? staleCandidates[0]?.staleGroupKey
+        ?? `${preferred.channelKey}:${platform}`;
+      logUploadEvent("stale_backlog_detected", {
+        cron_run_id: runId,
+        source,
+        job,
+        channel_key: preferred.channelKey,
+        platform,
+        stale_group_key: staleGroupKey,
+        stale_threshold_minutes: staleCandidates[0]?.staleThresholdMinutes,
+        stale_candidate_ids: staleCandidates.map((candidate) => candidate.item.id),
+        stale_count: staleCandidates.length,
+        selected_item_id: preferred.item.id,
+        selected_item_stale: preferred.isStale,
+      });
+    }
+
+    for (const candidate of staleCandidates) {
+      if (candidate.item.id === preferred.item.id) continue;
+      logUploadEvent("skip_group_already_handled", {
+        cron_run_id: runId,
+        source,
+        job,
+        backlog_guard_action: "skip_group_already_handled",
+        stale_group_key: candidate.staleGroupKey,
+        stale_threshold_minutes: candidate.staleThresholdMinutes,
+        channel_key: candidate.channelKey,
+        platform: candidate.item.platform,
+        video_type: candidate.item.videoType,
+        item_id: candidate.item.id,
+        content_id: candidate.item.contentId,
+        old_scheduled_at: new Date(candidate.item.scheduledAt).toISOString(),
+        selected_item_id: preferred.item.id,
+      });
+    }
+  }
+
+  logUploadEvent("selection", {
+    cron_run_id: runId,
+    source,
+    job,
+    selected_count: due.length,
+    selected_items: due.map((candidate) => ({
+      id: candidate.item.id,
+      content_id: candidate.item.contentId,
+      channel_key: candidate.channelKey,
+      platform: candidate.item.platform,
+      video_type: candidate.item.videoType,
+      status_before_claim: candidate.item.status,
+      scheduled_at: new Date(candidate.item.scheduledAt).toISOString(),
+      overdue_minutes: candidate.overdueMinutes,
+      stale_threshold_minutes: candidate.staleThresholdMinutes,
+      stale_group_key: candidate.staleGroupKey,
+      is_stale: candidate.isStale,
+    })),
+  });
 
   const results: UploadProcessResult[] = [];
   const autoScheduleSettings = await getAutoScheduleSettingsAction();
@@ -1282,12 +2225,36 @@ export async function processUploadQueueAction(input?: string | {
   // Channels confirmed quota-exceeded in this cron run — skip API calls for them
   const quotaExceededThisRun = new Set<number>();
 
-  for (const item of due) {
+  for (const candidate of due) {
+    const { item, channelKey, overdueMinutes, staleThresholdMinutes, staleGroupKey, isStale } = candidate;
     const now = new Date();
     const scheduledAt = new Date(item.scheduledAt);
-    const overdueMinutes = getOverdueMinutes(scheduledAt, now);
+    const logContext = {
+      cron_run_id: runId,
+      source,
+      job,
+      item_id: item.id,
+      content_id: item.contentId,
+      channel_key: channelKey,
+      platform: item.platform,
+      video_type: item.videoType,
+      status_before_claim: item.status,
+      scheduled_at: scheduledAt.toISOString(),
+      overdue_minutes: overdueMinutes,
+      stale_threshold_minutes: staleThresholdMinutes,
+      stale_group_key: staleGroupKey,
+      is_stale: isStale,
+    };
+
+    if (isStale) {
+      logUploadEvent("stale_backlog_allow_one", {
+        ...logContext,
+        backlog_guard_action: "allow_one",
+      });
+    }
 
     if (!isUploadScheduledDue(scheduledAt, now)) {
+      logUploadEvent("skip_not_due", logContext);
       results.push({ id: item.id, ok: false, error: "not_due_yet", overdueMinutes });
       continue;
     }
@@ -1329,6 +2296,51 @@ export async function processUploadQueueAction(input?: string | {
       }).where(eq(uploadQueue.id, item.id));
       results.push({ id: item.id, ok: false, error: destinationOwnershipError });
       continue;
+    }
+
+    const tangSauViolation = getTangSauIsolationViolation({
+      channelKey: item.content.channelKey,
+      nicheId: item.content.nicheId,
+      contentProfileKey: item.content.contentProfileKey,
+      formatType: item.content.formatType,
+      title: item.title,
+      topic: item.content.topic,
+      shortContent: item.content.shortContent,
+      script: item.content.script,
+      topicFamily: item.content.topicFamily,
+      promptVersions: item.content.promptVersions,
+    });
+    if (tangSauViolation) {
+      const err = `${tangSauViolation.code}: ${tangSauViolation.hits.join(", ")}`;
+      await db.update(uploadQueue).set({
+        status: "error",
+        errorMessage: err,
+        updatedAt: new Date(),
+      }).where(eq(uploadQueue.id, item.id));
+      results.push({ id: item.id, ok: false, error: err });
+      continue;
+    }
+
+    if (
+      resolveChannelKey(item.content.channelKey) === DEFAULT_CHANNEL_KEY &&
+      item.platform === "facebook" &&
+      item.videoType === "quote"
+    ) {
+      const alignedPrimary = await findAlignedPhatPhapPrimaryShortRow({
+        contentId: item.contentId,
+        quoteScheduledAt: scheduledAt,
+      });
+      if (!alignedPrimary) {
+        const err = "quote_sidecar_missing_primary_short";
+        await db.update(uploadQueue).set({
+          status: "error",
+          errorMessage: err,
+          updatedAt: new Date(),
+        }).where(eq(uploadQueue.id, item.id));
+        logUploadEvent("quote_sidecar_missing_primary_short", logContext);
+        results.push({ id: item.id, ok: false, error: err });
+        continue;
+      }
     }
 
     if (item.platform === "facebook" && item.channel.needsReconnect) {
@@ -1403,7 +2415,10 @@ export async function processUploadQueueAction(input?: string | {
       getMinIntervalForVideoType(item.videoType as PublishQueueType),
     );
     const lastAnchor = lastUpload?.scheduledAt
-      ? new Date(lastUpload.scheduledAt)
+      ? new Date(Math.max(
+          new Date(lastUpload.scheduledAt).getTime(),
+          lastUpload.uploadedAt ? new Date(lastUpload.uploadedAt).getTime() : 0,
+        ))
       : lastUpload?.uploadedAt
         ? new Date(lastUpload.uploadedAt)
         : null;
@@ -1411,18 +2426,87 @@ export async function processUploadQueueAction(input?: string | {
       ? new Date(lastAnchor.getTime() + intervalMin * 60_000)
       : null;
     if (nextAllowedAt && nextAllowedAt > new Date()) {
-      const deferredSlot = findNextBulkSlot(
-        scheduleConfig.windowStart,
-        scheduleConfig.windowEnd,
+      const takenRows = await getTakenUploadSlotsForDestination({
+        channelId: item.channelId,
+        platform: item.platform,
+        platformChannelId: item.channel.platformChannelId ?? null,
+        videoType: item.videoType,
+        since: new Date(Date.now() - 24 * 60 * 60 * 1000),
+        excludeQueueIds: [item.id],
+      });
+      const slotOffsetMinutes = getSlotOffsetMinutes(scheduledAt, intervalMin);
+      const deferredTaken = takenRows.map((row) => row.scheduledAt.getTime());
+      const deferredSlot = findNextAvailablePublishSlot({
+        windowStart: scheduleConfig.windowStart,
+        windowEnd: scheduleConfig.windowEnd,
         intervalMin,
-        [],
-        nextAllowedAt,
-      ) ?? nextAllowedAt;
-      await db.update(uploadQueue).set({
-        scheduledAt: deferredSlot,
-        errorMessage: `Dời lịch để giữ khoảng cách ${intervalMin} phút`,
-        updatedAt: new Date(),
-      }).where(eq(uploadQueue.id, item.id));
+        taken: deferredTaken,
+        notBefore: nextAllowedAt,
+        slotOffsetMinutes,
+      }) ?? nextAllowedAt;
+      const deferMessage = `Dời lịch để giữ khoảng cách ${intervalMin} phút`;
+      const isPhatPhapCampaignItem = isPhatPhapCampaignQueueItem({
+        channelKey: item.content.channelKey,
+        platform: item.platform,
+        videoType: item.videoType,
+      });
+
+      let syncedRows: Array<{ id: string; platform: string; videoType: string; scheduledAt: string }> = [];
+      let syncBlockedReason: string | null = null;
+      if (isPhatPhapCampaignItem) {
+        const anchorShortScheduledAt = item.videoType === "quote"
+          ? new Date(deferredSlot.getTime() - 5 * 60_000)
+          : deferredSlot;
+        const syncResult = await syncQueuedPhatPhapCampaignRows({
+          contentId: item.contentId,
+          anchorShortScheduledAt,
+          errorMessage: deferMessage,
+        });
+        syncedRows = syncResult.moved;
+        if (syncResult.blocked) {
+          // No anchor is collision-free across every sibling lane. Leave all of this
+          // content item's rows untouched rather than moving only `item` onto a slot
+          // that was only ever checked against its own lane — that is the exact bug
+          // being fixed here.
+          syncBlockedReason = syncResult.reason;
+        } else if (syncedRows.length === 0) {
+          await db.update(uploadQueue).set({
+            scheduledAt: deferredSlot,
+            errorMessage: deferMessage,
+            updatedAt: new Date(),
+          }).where(eq(uploadQueue.id, item.id));
+        }
+      } else {
+        await db.update(uploadQueue).set({
+          scheduledAt: deferredSlot,
+          errorMessage: deferMessage,
+          updatedAt: new Date(),
+        }).where(eq(uploadQueue.id, item.id));
+      }
+      if (syncBlockedReason) {
+        logUploadEvent("skip_cooldown_blocked_no_safe_anchor", {
+          ...logContext,
+          defer_blocked_reason: syncBlockedReason,
+        });
+        results.push({ id: item.id, ok: false, error: `defer_blocked: ${syncBlockedReason}` });
+        continue;
+      }
+      logUploadEvent("skip_cooldown", {
+        ...logContext,
+        backlog_guard_action: isStale ? "defer_due_to_cooldown" : undefined,
+        last_done_scheduled_at: lastUpload?.scheduledAt
+          ? new Date(lastUpload.scheduledAt).toISOString()
+          : null,
+        last_done_uploaded_at: lastUpload?.uploadedAt
+          ? new Date(lastUpload.uploadedAt).toISOString()
+          : null,
+        next_allowed_publish_at: nextAllowedAt.toISOString(),
+        old_scheduled_at: scheduledAt.toISOString(),
+        new_scheduled_at: deferredSlot.toISOString(),
+        deferred_to: deferredSlot.toISOString(),
+        interval_min: intervalMin,
+        synced_rows: syncedRows,
+      });
       results.push({ id: item.id, ok: false, error: "upload_interval_deferred" });
       continue;
     }
@@ -1439,7 +2523,11 @@ export async function processUploadQueueAction(input?: string | {
       .set({ status: "uploading", updatedAt: new Date() })
       .where(and(eq(uploadQueue.id, item.id), eq(uploadQueue.status, "queued")))
       .returning({ id: uploadQueue.id });
-    if (!claimed) continue; // another caller already claimed it
+    if (!claimed) {
+      logUploadEvent("claim_failed", logContext);
+      continue;
+    }
+    logUploadEvent("claim_succeeded", logContext);
 
     const videoPath = item.videoType === "long"
       ? item.content.longVideoPath
@@ -1489,6 +2577,54 @@ export async function processUploadQueueAction(input?: string | {
     }
 
     if (item.platform === "youtube") {
+      const guardError = getYouTubePublishGuardError(item);
+      if (guardError) {
+        await db.update(uploadQueue).set({
+          status: "error",
+          errorMessage: guardError,
+          updatedAt: new Date(),
+        }).where(eq(uploadQueue.id, item.id));
+        logUploadEvent("youtube_publish_guard_failed", {
+          ...logContext,
+          guard_error: guardError,
+          oauth_client_config_id: item.channel.oauthClientConfigId ?? null,
+          destination_channel_id: item.channel.platformChannelId ?? null,
+          destination_channel_name: item.channel.name,
+        });
+        results.push({ id: item.id, ok: false, error: guardError });
+        continue;
+      }
+
+      const destinationVerification = await verifyYouTubeUploadDestination(item.channelId);
+      if (!destinationVerification.ok) {
+        await db.update(uploadQueue).set({
+          status: "error",
+          errorMessage: destinationVerification.error,
+          updatedAt: new Date(),
+        }).where(eq(uploadQueue.id, item.id));
+        logUploadEvent("youtube_publish_guard_failed", {
+          ...logContext,
+          guard_error: destinationVerification.error,
+          oauth_credential_identity: destinationVerification.oauthCredentialIdentity,
+          oauth_client_config_id: destinationVerification.oauthClientConfigId,
+          destination_channel_id: destinationVerification.destinationChannelId,
+          destination_channel_name: destinationVerification.destinationChannelName,
+          accessible_channel_ids: destinationVerification.accessibleChannelIds,
+          mine_candidate_count: destinationVerification.candidateCount,
+        });
+        results.push({ id: item.id, ok: false, error: destinationVerification.error });
+        continue;
+      }
+
+      logUploadEvent("youtube_publish_target_verified", {
+        ...logContext,
+        oauth_credential_identity: destinationVerification.oauthCredentialIdentity,
+        oauth_client_config_id: destinationVerification.oauthClientConfigId,
+        destination_channel_id: destinationVerification.destinationChannelId,
+        destination_channel_name: destinationVerification.destinationChannelName,
+        mine_candidate_count: destinationVerification.candidateCount,
+      });
+
       if (item.videoType === "quote") {
         const err = "Quote post chỉ hỗ trợ cho Facebook";
         await db.update(uploadQueue).set({
@@ -1532,6 +2668,11 @@ export async function processUploadQueueAction(input?: string | {
 
         await cleanupUploadedMediaFiles(item.contentId, item.videoType as PublishQueueType);
 
+        logUploadEvent("publish_succeeded", {
+          ...logContext,
+          platform_video_id: res.videoId,
+          platform_video_url: res.videoUrl,
+        });
         results.push({ id: item.id, ok: true, overdueMinutes });
 
       } else if (isQuotaExceededError(res.error)) {
@@ -1655,6 +2796,10 @@ export async function processUploadQueueAction(input?: string | {
           `📺 Kênh: ${item.channel.name}\n` +
           `💥 Lỗi: <code>${res.error.slice(0, 200)}</code>`
         );
+        logUploadEvent("publish_failed", {
+          ...logContext,
+          error: res.error,
+        });
         results.push({ id: item.id, ok: false, error: res.error });
       }
 
@@ -1684,6 +2829,7 @@ export async function processUploadQueueAction(input?: string | {
       continue;
     }
     if (item.videoType === "quote") {
+      const storedQuoteArtifact = readStoredQuoteArtifactMetadata(item.content.promptVersions);
       const sourceImage = resolveFacebookQuoteImageSource({
         contentId: item.contentId,
         imagePaths: item.content.imagePaths as string[] | null,
@@ -1705,7 +2851,11 @@ export async function processUploadQueueAction(input?: string | {
           contentId: item.contentId,
           topic: item.content.topic,
           shortContent: item.content.shortContent,
+          quoteText: storedQuoteArtifact?.quoteText ?? null,
           imagePath: sourceImage.sourceImagePath,
+          channelKey: item.content.channelKey,
+          contentProfileKey: item.content.contentProfileKey,
+          nicheName: item.content.nicheName,
         });
         tempImagePath = rendered.imagePath;
         const res = await uploadToFacebookPhotoPost(item.channelId, {
@@ -1738,6 +2888,14 @@ export async function processUploadQueueAction(input?: string | {
 
           await cleanupUploadedMediaFiles(item.contentId, item.videoType as PublishQueueType);
 
+          logUploadEvent("publish_succeeded", {
+            ...logContext,
+            platform_video_id: res.postId || res.photoId,
+            platform_video_url: res.postUrl,
+            quote_source_type: storedQuoteArtifact?.quoteSourceType ?? "unknown",
+            quote_style: storedQuoteArtifact?.quoteStyle ?? "unknown",
+            kinetic: storedQuoteArtifact?.kinetic ?? null,
+          });
           results.push({
             id: item.id,
             ok: true,
@@ -1798,6 +2956,10 @@ export async function processUploadQueueAction(input?: string | {
               errorMessage: res.error,
               updatedAt: new Date(),
             }).where(eq(uploadQueue.id, item.id));
+            logUploadEvent("publish_failed", {
+              ...logContext,
+              error: res.error,
+            });
             results.push({
               id: item.id,
               ok: false,
@@ -1850,6 +3012,11 @@ export async function processUploadQueueAction(input?: string | {
 
         await cleanupUploadedMediaFiles(item.contentId, item.videoType as PublishQueueType);
 
+        logUploadEvent("publish_succeeded", {
+          ...logContext,
+          platform_video_id: res.reelId,
+          platform_video_url: res.reelUrl,
+        });
         results.push({ id: item.id, ok: true, overdueMinutes });
       } else {
         if (isFacebookAuthError(res.error)) {
@@ -1901,6 +3068,10 @@ export async function processUploadQueueAction(input?: string | {
             facebookUploadStatus: "error",
             facebookUploadError: res.error,
           }).where(eq(contentGenerations.id, item.contentId));
+          logUploadEvent("publish_failed", {
+            ...logContext,
+            error: res.error,
+          });
           results.push({ id: item.id, ok: false, error: res.error });
         }
       }
@@ -2005,24 +3176,81 @@ async function cleanupUploadedMediaFiles(
   }
 }
 
+// Defers every queued row for this channel due at/before deferUntil onto a distinct,
+// lane-aware canonical slot (short/reel -> HH:00, quote/photo sidecar -> HH:05), instead of
+// bulk-writing one shared timestamp to every matching row. Rows are processed in their
+// current scheduledAt order so relative ordering is preserved. If no safe future slot can
+// be found for a row (14-day horizon exhausted), that row is left untouched rather than
+// guessing — callers should treat a return value lower than the matched row count as a
+// signal to investigate.
 async function pauseQueuedUploadsForChannel(
   channelId: number,
   message: string,
   deferUntil: Date,
 ): Promise<number> {
-  const result = await db.update(uploadQueue)
-    .set({
-      scheduledAt: deferUntil,
-      errorMessage: message.slice(0, 500),
-      updatedAt: new Date(),
+  const channel = await db.query.socialChannels.findFirst({
+    where: eq(socialChannels.id, channelId),
+  });
+  if (!channel) return 0;
+
+  const affectedRows = await db
+    .select({
+      id: uploadQueue.id,
+      videoType: uploadQueue.videoType,
+      platform: uploadQueue.platform,
+      scheduledAt: uploadQueue.scheduledAt,
     })
+    .from(uploadQueue)
     .where(and(
       eq(uploadQueue.channelId, channelId),
       eq(uploadQueue.status, "queued"),
       lte(uploadQueue.scheduledAt, deferUntil),
     ))
-    .returning({ id: uploadQueue.id });
-  return result.length;
+    .orderBy(asc(uploadQueue.scheduledAt));
+
+  if (affectedRows.length === 0) return 0;
+
+  const takenByLane = new Map<string, number[]>();
+  let updated = 0;
+
+  for (const row of affectedRows) {
+    let taken = takenByLane.get(row.videoType);
+    if (!taken) {
+      const existing = await getTakenUploadSlotsForDestination({
+        channelId,
+        platform: row.platform,
+        platformChannelId: channel.platformChannelId,
+        videoType: row.videoType,
+        since: new Date(),
+        excludeQueueIds: [row.id],
+      });
+      taken = existing.map((slot) => slot.scheduledAt.getTime());
+      takenByLane.set(row.videoType, taken);
+    }
+
+    // Lane convention: quote/photo sidecar rides on the HH:05 offset; short/reel stays on HH:00.
+    const slotOffsetMinutes = row.videoType === "quote" ? 5 : 0;
+    const nextSlot = findNextAvailablePublishSlot({
+      windowStart: "06:00",
+      windowEnd: "22:00",
+      intervalMin: 60,
+      taken,
+      notBefore: deferUntil,
+      slotOffsetMinutes,
+    });
+    if (!nextSlot) continue;
+
+    taken.push(nextSlot.getTime());
+
+    await db.update(uploadQueue).set({
+      scheduledAt: nextSlot,
+      errorMessage: message.slice(0, 500),
+      updatedAt: new Date(),
+    }).where(eq(uploadQueue.id, row.id));
+    updated += 1;
+  }
+
+  return updated;
 }
 
 export async function cleanupMediaFilesAction(): Promise<{ cleaned: number }> {

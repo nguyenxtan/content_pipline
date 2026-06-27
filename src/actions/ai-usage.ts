@@ -2,8 +2,10 @@
 
 import { db } from "@/lib/db";
 import { apiUsageLogs } from "@/lib/db/schema";
-import { desc, sql, gte, and } from "drizzle-orm";
+import { desc, sql, gte } from "drizzle-orm";
 import { calcCost, getModelInfo, type ModelProvider } from "@/lib/ai-models";
+import { writeCostEvent } from "@/lib/cost/write-cost-event";
+import { DEFAULT_USD_TO_VND } from "@/lib/cost/cost-constants";
 
 export interface LogUsageParams {
   model: string;
@@ -16,14 +18,31 @@ export interface LogUsageParams {
   metadata?: Record<string, unknown>;
 }
 
+function purposeToCostType(purpose: string, model: string): string {
+  if (purpose === "image_generation" || model.startsWith("fal-ai/")) return "image";
+  if (purpose === "image_prompts") return "image_prompt";
+  if (purpose === "quote_text" || purpose === "quote") return "quote_text";
+  if (purpose.startsWith("content_")) return "script";
+  if (purpose.includes("hook")) return "hook";
+  if (purpose.includes("topic")) return "topic";
+  return "llm";
+}
+
+function modelToProvider(model: string, provider: ModelProvider): string {
+  if (model.startsWith("fal-ai/")) return "fal";
+  if (provider === "openai" || model.startsWith("openrouter/") || model.startsWith("anthropic/") || model.startsWith("google/") || model.startsWith("meta-llama/")) return "openrouter";
+  return provider;
+}
+
 /** Ghi 1 lần gọi API vào log — gọi sau mỗi LLM response */
 export async function logApiUsage(params: LogUsageParams): Promise<void> {
   const modelInfo = getModelInfo(params.model);
   const provider: ModelProvider = modelInfo?.provider ?? "openai";
   const costUsd = params.costUsd ?? calcCost(params.model, params.inputTokens, params.outputTokens);
 
+  let logId: number | undefined;
   try {
-    await db.insert(apiUsageLogs).values({
+    const inserted = await db.insert(apiUsageLogs).values({
       model: params.model,
       provider,
       purpose: params.purpose,
@@ -33,10 +52,46 @@ export async function logApiUsage(params: LogUsageParams): Promise<void> {
       nicheId: params.nicheId ?? null,
       contentGenerationId: params.contentGenerationId ?? null,
       metadata: params.metadata ?? {},
-    });
+    }).returning({ id: apiUsageLogs.id });
+    logId = inserted[0]?.id;
   } catch {
     // logging không nên làm gián đoạn luồng chính
     console.error("[logApiUsage] Failed to write usage log");
+    return;
+  }
+
+  // Fire-and-forget cost event only when we have a contentId to link
+  if (params.contentGenerationId && logId != null) {
+    const costVnd = costUsd > 0 ? Math.round(costUsd * DEFAULT_USD_TO_VND * 100) / 100 : 0;
+    const costType = purposeToCostType(params.purpose, params.model);
+    const providerName = modelToProvider(params.model, provider);
+    const isFal = params.model.startsWith("fal-ai/");
+
+    void writeCostEvent({
+      contentId: params.contentGenerationId,
+      provider: providerName,
+      costType,
+      sourceTable: "api_usage_logs",
+      sourceId: String(logId),
+      status: "done",
+      usageUnit: isFal ? "image" : "token",
+      usageAmount: isFal
+        ? (params.metadata?.numImages as number | undefined) ?? null
+        : params.inputTokens + params.outputTokens,
+      unitCostVnd: isFal
+        ? (costUsd > 0 && (params.metadata?.numImages as number | undefined) ? Math.round((costUsd / (params.metadata!.numImages as number)) * DEFAULT_USD_TO_VND * 100) / 100 : null)
+        : null,
+      costVnd,
+      costSource: costUsd > 0 ? "configured_rate" : "unknown",
+      metadata: {
+        model: params.model,
+        purpose: params.purpose,
+        inputTokens: params.inputTokens,
+        outputTokens: params.outputTokens,
+        costUsd,
+        ...(params.metadata ?? {}),
+      },
+    });
   }
 }
 
@@ -160,4 +215,3 @@ export async function getUsageSummaryAction(days = 30): Promise<UsageSummary> {
     })),
   };
 }
-

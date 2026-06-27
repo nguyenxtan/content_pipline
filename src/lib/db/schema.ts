@@ -13,11 +13,18 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
+import type { PromptVersionSnapshot } from "@/lib/prompt-version-registry";
 
 export const niches = pgTable("niches", {
   id: serial("id").primaryKey(),
   name: varchar("name", { length: 100 }).notNull().unique(),
   slug: varchar("slug", { length: 100 }).notNull().unique(),
+  contentProfileKey: varchar("content_profile_key", { length: 50 })
+    .default("buddhism")
+    .notNull(),
+  channelKey: varchar("channel_key", { length: 50 })
+    .default("phat_phap")
+    .notNull(),
   description: text("description"),
   icon: varchar("icon", { length: 10 }),
   category: varchar("category", { length: 100 }),
@@ -140,6 +147,92 @@ export const agentSuggestions = pgTable("agent_suggestions", {
     .notNull(),
 });
 
+export const ttsVoices = pgTable(
+  "tts_voices",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => crypto.randomUUID()),
+    provider: varchar("provider", { length: 50 }).notNull(),
+    voiceId: text("voice_id").notNull(),
+    name: text("name").notNull(),
+    gender: varchar("gender", { length: 50 }),
+    age: varchar("age", { length: 50 }),
+    language: varchar("language", { length: 100 }),
+    category: text("category"),
+    useCase: text("use_case"),
+    rawJson: jsonb("raw_json"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("uniq_tts_voices_provider_voice").on(table.provider, table.voiceId),
+    index("idx_tts_voices_provider").on(table.provider),
+    index("idx_tts_voices_language").on(table.language),
+  ]
+);
+
+export const ttsJobs = pgTable(
+  "tts_jobs",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => crypto.randomUUID()),
+    provider: varchar("provider", { length: 50 }).notNull(),
+    externalJobId: text("external_job_id").notNull(),
+    voiceId: text("voice_id"),
+    chapterId: text("chapter_id"),
+    status: varchar("status", { length: 40 }).notNull().default("queued"),
+    creditUsed: numeric("credit_used", { precision: 12, scale: 4 }),
+    audioUrl: text("audio_url"),
+    srtUrl: text("srt_url"),
+    rawJson: jsonb("raw_json"),
+    // Usage tracking fields (added in 0040_tts_usage_tracking)
+    pipelineRoute: varchar("pipeline_route", { length: 80 }),
+    contentId: text("content_id"),
+    contentProfileKey: text("content_profile_key"),
+    nicheName: text("niche_name"),
+    formatType: text("format_type"),
+    voiceLabel: text("voice_label"),
+    voiceFamily: varchar("voice_family", { length: 80 }),
+    speed: numeric("speed", { precision: 6, scale: 3 }),
+    pitch: numeric("pitch", { precision: 6, scale: 3 }),
+    textHash: text("text_hash"),
+    textCharCount: integer("text_char_count"),
+    cacheIdentity: text("cache_identity"),
+    cacheHit: boolean("cache_hit").default(false),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    durationMs: integer("duration_ms"),
+    errorMessage: text("error_message"),
+    usageSource: varchar("usage_source", { length: 30 }),
+    estimatedCredits: numeric("estimated_credits", { precision: 12, scale: 4 }),
+    balanceBefore: numeric("balance_before", { precision: 14, scale: 4 }),
+    balanceAfter: numeric("balance_after", { precision: 14, scale: 4 }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("uniq_tts_jobs_provider_external").on(table.provider, table.externalJobId),
+    index("idx_tts_jobs_provider_status").on(table.provider, table.status),
+    index("idx_tts_jobs_chapter").on(table.chapterId),
+    index("idx_tts_jobs_content_id").on(table.contentId),
+    index("idx_tts_jobs_pipeline_route_created").on(table.pipelineRoute, table.createdAt),
+    index("idx_tts_jobs_provider_created_at").on(table.provider, table.createdAt),
+    index("idx_tts_jobs_voice_family_created").on(table.voiceFamily, table.createdAt),
+    index("idx_tts_jobs_status_created").on(table.status, table.createdAt),
+    index("idx_tts_jobs_cache_hit").on(table.cacheHit),
+  ]
+);
+
 export const generatedContents = pgTable(
   "generated_contents",
   {
@@ -229,11 +322,30 @@ export const contentGenerations = pgTable(
       .notNull()
       .references(() => niches.id, { onDelete: "cascade" }),
     nicheName: varchar("niche_name", { length: 100 }).notNull(),
+    contentProfileKey: varchar("content_profile_key", { length: 50 })
+      .default("buddhism")
+      .notNull(),
+    channelKey: varchar("channel_key", { length: 50 })
+      .default("phat_phap")
+      .notNull(),
     script: text("script").notNull(),
     shortContent: text("short_content").notNull(),
     shortHookCandidates: jsonb("short_hook_candidates").$type<string[]>().default([]),
     shortSelectedHook: text("short_selected_hook"),
+    hookScoredCandidates: jsonb("hook_scored_candidates").$type<Array<{
+      index: number;
+      hook: string;
+      scores: { curiosity: number; emotion: number; relatability: number; retention: number; total: number };
+    }>>().default([]),
+    hookScore: integer("hook_score"),
+    hookPattern: varchar("hook_pattern", { length: 50 }),
+    hookType: varchar("hook_type", { length: 50 }),          // English type: question|shock|contradiction|...
+    hookVariant: varchar("hook_variant", { length: 100 }),   // experiment variant or selection strategy
+    hookGeneratedAt: timestamp("hook_generated_at", { withTimezone: true }),
     longContent: text("long_content").notNull(),
+    promptVersions: jsonb("prompt_versions").$type<PromptVersionSnapshot>().default({}),
+    experimentId: text("experiment_id"),
+    experimentVariant: text("experiment_variant"),
     // ── Phase 6: Observability ─────────────────────────────────
     thumbnailText: text("thumbnail_text"),          // text rendered on thumbnail
     renderTimeTotalMs: integer("render_time_total_ms"), // wall-clock pipeline time
@@ -297,6 +409,15 @@ export const contentGenerations = pgTable(
     // mediaCleanedAt: set khi đã xoá file audio/images/video
     mediaCleanedAt: timestamp("media_cleaned_at", { withTimezone: true }),
     contentMode: varchar("content_mode", { length: 10 }).default("both").notNull(),
+    formatType: text("format_type"),
+    topicFamily: text("topic_family"),
+    // Voice Rotation V1: voice locked at INSERT time by voice-rotation.ts.
+    // NULL = use niche default (Ly). Non-null = never changed after audio generated.
+    ttsVoice: varchar("tts_voice", { length: 50 }),
+    // ── Short Cover Asset ──────────────────────────────────────────────────────
+    shortCoverAssetPath: text("short_cover_asset_path"),      // media/covers/{id}-short-cover.jpg
+    shortCoverText: text("short_cover_text"),                  // coverText used for rendering
+    shortCoverGeneratedAt: timestamp("short_cover_generated_at", { withTimezone: true }),
     isLocked: boolean("is_locked").default(false).notNull(),
     lockedAt: timestamp("locked_at", { withTimezone: true }),
     lockedBy: text("locked_by"),
@@ -308,6 +429,7 @@ export const contentGenerations = pgTable(
     index("idx_content_gen_niche").on(table.nicheId),
     index("idx_content_gen_created").on(table.createdAt),
     index("idx_content_gen_topic").on(table.topic),
+    index("idx_content_gen_experiment").on(table.experimentId, table.experimentVariant),
     index("idx_content_gen_locked").on(table.isLocked),
   ]
 );
@@ -486,6 +608,9 @@ export const socialChannels = pgTable(
   {
     id: serial("id").primaryKey(),
     platform: varchar("platform", { length: 20 }).notNull(), // 'youtube' | 'facebook'
+    channelKey: varchar("channel_key", { length: 50 })
+      .default("phat_phap")
+      .notNull(),
     name: varchar("name", { length: 200 }).notNull(),          // tên hiển thị
     platformChannelId: varchar("platform_channel_id", { length: 200 }), // YT channel ID / FB page ID
     platformHandle: varchar("platform_handle", { length: 100 }), // @handle
@@ -617,6 +742,11 @@ export const videoMetricSnapshots = pgTable(
     ctr: numeric("ctr", { precision: 6, scale: 4 }),                      // click-through rate 0.0000–1.0000
     avgViewDurationSec: integer("avg_view_duration_sec"),                  // average view duration
     retentionPct: numeric("retention_pct", { precision: 5, scale: 2 }),   // average % viewed
+    // YouTube Analytics Phase A fields
+    estimatedMinutesWatched: integer("estimated_minutes_watched"),         // total minutes watched (Analytics API)
+    subscribersGained: integer("subscribers_gained"),                      // subscribers gained from this video
+    subscribersLost: integer("subscribers_lost"),                          // subscribers lost from this video
+    engagedViews: bigint("engaged_views", { mode: "number" }),             // schema-only; not available at per-video level in current API scope
     privacyStatus: varchar("privacy_status", { length: 20 }),
     durationSeconds: integer("duration_seconds"),
     rawJson: jsonb("raw_json"),
@@ -819,6 +949,759 @@ export const videoMetricSnapshotsRelations = relations(videoMetricSnapshots, ({ 
     references: [publishedVideos.id],
   }),
 }));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1 Phút Tài Chính — Finance News Branch (experimental, isolated)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * RSS feed registry for the finance news collector.
+ * Each row is one feed. The collector only processes is_active = true rows.
+ */
+export const financeNewsSources = pgTable(
+  "finance_news_sources",
+  {
+    id:              serial("id").primaryKey(),
+    name:            varchar("name",     { length: 100 }).notNull(),
+    rssUrl:          text("rss_url").notNull().unique(),
+    isActive:        boolean("is_active").notNull().default(true),
+    language:        varchar("language", { length: 10  }).notNull().default("en"),
+    topicTags:       jsonb("topic_tags").$type<string[]>().notNull().default([]),
+    fetchIntervalMin: integer("fetch_interval_min").notNull().default(30),
+    lastFetchedAt:   timestamp("last_fetched_at",  { withTimezone: true }),
+    lastFetchError:  text("last_fetch_error"),
+    // ── Source quality metadata (Phase C) ──────────────────────────────────
+    qualityScore:    numeric("quality_score",   { precision: 3, scale: 1 }).notNull().default("5.0"),
+    sourceType:      varchar("source_type",     { length: 20  }).notNull().default("rss"),
+    defaultTopicTags: jsonb("default_topic_tags").$type<string[]>().notNull().default([]),
+    notes:           text("notes"),
+    createdAt:       timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("idx_finance_news_sources_active").on(t.isActive),
+  ]
+);
+
+export type FinanceNewsSource    = typeof financeNewsSources.$inferSelect;
+export type NewFinanceNewsSource = typeof financeNewsSources.$inferInsert;
+
+/**
+ * Raw ingest table for finance news items.
+ * Deduplication key: url_hash (SHA-256 of canonical URL).
+ * Items stay in status='raw' until a Phase D scorer promotes them.
+ */
+export const financeRawItems = pgTable(
+  "finance_raw_items",
+  {
+    id:            text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    sourceId:      integer("source_id").notNull().references(() => financeNewsSources.id, { onDelete: "cascade" }),
+    url:           text("url").notNull(),
+    urlHash:       varchar("url_hash", { length: 64 }).notNull().unique(), // SHA-256(url)
+    title:         text("title").notNull(),
+    summary:       text("summary"),
+    publishedAt:   timestamp("published_at", { withTimezone: true }),
+    sourceName:    varchar("source_name", { length: 100 }),
+    topicTags:     jsonb("topic_tags").$type<string[]>().notNull().default([]),
+    // Article image from RSS enclosure / media:content — not yet downloaded (Phase C)
+    ogImageUrl:    text("og_image_url"),
+    // ── Freshness tracking (Phase C-lite) ─────────────────────────────────
+    // firstSeenAt: set once at insert, never overwritten — use for freshness ranking
+    firstSeenAt:  timestamp("first_seen_at",  { withTimezone: true }).defaultNow().notNull(),
+    // lastSeenAt: updated each time the same URL appears in a later RSS fetch
+    lastSeenAt:   timestamp("last_seen_at",   { withTimezone: true }),
+    // collectedAt: the clock time of the most recent fetch that touched this row
+    collectedAt:  timestamp("collected_at",   { withTimezone: true }).defaultNow().notNull(),
+    // freshnessBucket: classified from best available reference time (published_at if valid, else first_seen_at)
+    // values: last_1h | last_3h | last_6h | last_24h | older | unknown
+    freshnessBucket: varchar("freshness_bucket", { length: 20 }),
+    // ── Image cache (Phase C) ──────────────────────────────────────────────
+    // pending | cached | failed | skipped
+    imageCachedStatus: varchar("image_cached_status", { length: 20 }).default("pending"),
+    localImagePath:    text("local_image_path"),
+    imageWidth:        integer("image_width"),
+    imageHeight:       integer("image_height"),
+    imageDownloadedAt: timestamp("image_downloaded_at", { withTimezone: true }),
+    imageContentType:  text("image_content_type"),
+    imageBytes:        integer("image_bytes"),
+    imageError:        text("image_error"),
+    // ── Phase D+: scoring and promotion ───────────────────────────────────
+    importanceScore: numeric("importance_score", { precision: 4, scale: 2 }),
+    status:        varchar("status", { length: 20 }).notNull().default("raw"),
+    // raw | scored | promoted | skipped
+    // Set when this item is promoted to a contentGenerations row (Phase F)
+    contentGenerationId: text("content_generation_id")
+      .references(() => contentGenerations.id, { onDelete: "set null" }),
+    // Full RSS entry JSON for debugging
+    rawPayload:    jsonb("raw_payload").$type<Record<string, unknown>>(),
+    createdAt:     timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("idx_finance_raw_items_source").on(t.sourceId),
+    index("idx_finance_raw_items_status").on(t.status),
+    index("idx_finance_raw_items_published").on(t.publishedAt),
+    index("idx_finance_raw_items_first_seen").on(t.firstSeenAt),
+    index("idx_finance_raw_items_created").on(t.createdAt),
+  ]
+);
+
+export type FinanceRawItem    = typeof financeRawItems.$inferSelect;
+export type NewFinanceRawItem = typeof financeRawItems.$inferInsert;
+
+export const financeNewsSourcesRelations = relations(financeNewsSources, ({ many }) => ({
+  items: many(financeRawItems),
+}));
+
+export const financeRawItemsRelations = relations(financeRawItems, ({ one }) => ({
+  source: one(financeNewsSources, {
+    fields: [financeRawItems.sourceId],
+    references: [financeNewsSources.id],
+  }),
+}));
+
+// ─── Story Library Source Tables ────────────────────────────────────────────
+
+export const storySources = pgTable(
+  "story_sources",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    sourceSite: varchar("source_site", { length: 120 }).notNull(),
+    sourceUrl: text("source_url").notNull().unique(),
+    slug: varchar("slug", { length: 255 }).notNull(),
+    title: varchar("title", { length: 500 }).notNull(),
+    author: varchar("author", { length: 255 }),
+    genres: jsonb("genres").$type<string[]>().default([]).notNull(),
+    status: varchar("status", { length: 50 }),
+    intro: text("intro"),
+    chapterCount: integer("chapter_count").default(0).notNull(),
+    crawledChapterCount: integer("crawled_chapter_count").default(0).notNull(),
+    totalWordCount: integer("total_word_count").default(0).notNull(),
+    crawlStatus: varchar("crawl_status", { length: 20 }).notNull().default("queued"),
+    lastError: text("last_error"),
+    lastCrawledAt: timestamp("last_crawled_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("idx_story_sources_site").on(t.sourceSite),
+    index("idx_story_sources_slug").on(t.slug),
+    index("idx_story_sources_crawl_status").on(t.crawlStatus),
+    index("idx_story_sources_updated").on(t.updatedAt),
+  ]
+);
+
+export const storySourceChapters = pgTable(
+  "story_source_chapters",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    storyId: text("story_id").notNull().references(() => storySources.id, { onDelete: "cascade" }),
+    chapterNumber: integer("chapter_number").notNull(),
+    chapterTitle: varchar("chapter_title", { length: 500 }),
+    chapterUrl: text("chapter_url").notNull().unique(),
+    contentText: text("content_text"),
+    wordCount: integer("word_count").default(0).notNull(),
+    contentHash: varchar("content_hash", { length: 64 }),
+    crawlStatus: varchar("crawl_status", { length: 20 }).notNull().default("queued"),
+    lastError: text("last_error"),
+    fallbackUrl: text("fallback_url"),
+    fallbackSourceSite: varchar("fallback_source_site", { length: 120 }),
+    fallbackContentLength: integer("fallback_content_length"),
+    fallbackLastCheckedAt: timestamp("fallback_last_checked_at", { withTimezone: true }),
+    recoveryStatus: varchar("recovery_status", { length: 40 }),
+    recoveryMethod: varchar("recovery_method", { length: 40 }),
+    recoveryNote: text("recovery_note"),
+    recoveredAt: timestamp("recovered_at", { withTimezone: true }),
+    recoveredFromSourceSite: varchar("recovered_from_source_site", { length: 120 }),
+    recoveredFromUrl: text("recovered_from_url"),
+    crawledAt: timestamp("crawled_at", { withTimezone: true }),
+    // "Đã kiểm tra" — a manual human read-through flag only. Deliberately separate
+    // from audio_text_status below: a chapter can be reviewedAt-checked by a human
+    // and still contain unresolved obfuscation that must block TTS.
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    // Pre-TTS audio text layer. Always derived from contentText; never overwrites it.
+    // audioTextStatus: raw | normalized | needs_review | approved | blocked
+    audioText: text("audio_text"),
+    audioTextStatus: varchar("audio_text_status", { length: 20 }).notNull().default("raw"),
+    audioTextIssueCount: integer("audio_text_issue_count").default(0).notNull(),
+    audioTextNormalizationVersion: varchar("audio_text_normalization_version", { length: 20 }),
+    // null = derived from raw content_text by the automated normalizer; "manual_import"
+    // = an admin pasted clean text directly (see audio_text_review_note for provenance:
+    // source URL/site/note are appended there rather than adding more columns).
+    audioTextSource: varchar("audio_text_source", { length: 20 }),
+    audioTextUpdatedAt: timestamp("audio_text_updated_at", { withTimezone: true }),
+    audioTextReviewedAt: timestamp("audio_text_reviewed_at", { withTimezone: true }),
+    audioTextReviewNote: text("audio_text_review_note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("idx_story_source_chapters_story").on(t.storyId),
+    index("idx_story_source_chapters_status").on(t.crawlStatus),
+    index("idx_story_source_chapters_recovery_status").on(t.recoveryStatus),
+    index("idx_story_source_chapters_audio_text_status").on(t.audioTextStatus),
+    uniqueIndex("uniq_story_source_chapter_number").on(t.storyId, t.chapterNumber),
+  ]
+);
+
+export const storySourcesRelations = relations(storySources, ({ many }) => ({
+  chapters: many(storySourceChapters),
+}));
+
+export const storySourceChaptersRelations = relations(storySourceChapters, ({ one }) => ({
+  story: one(storySources, { fields: [storySourceChapters.storyId], references: [storySources.id] }),
+}));
+
+export const storyCrawlRuns = pgTable(
+  "story_crawl_runs",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    mode: varchar("mode", { length: 40 }).notNull(),
+    sourceSite: varchar("source_site", { length: 120 }),
+    status: varchar("status", { length: 30 }).notNull().default("running"),
+    startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }).defaultNow().notNull(),
+    currentStoryId: text("current_story_id").references(() => storySources.id, { onDelete: "set null" }),
+    currentStoryTitle: varchar("current_story_title", { length: 500 }),
+    currentChapterId: text("current_chapter_id").references(() => storySourceChapters.id, { onDelete: "set null" }),
+    currentChapterTitle: varchar("current_chapter_title", { length: 500 }),
+    currentUrl: text("current_url"),
+    attemptedStories: integer("attempted_stories").default(0).notNull(),
+    attemptedChapters: integer("attempted_chapters").default(0).notNull(),
+    succeededChapters: integer("succeeded_chapters").default(0).notNull(),
+    failedChapters: integer("failed_chapters").default(0).notNull(),
+    skippedDuplicates: integer("skipped_duplicates").default(0).notNull(),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("idx_story_crawl_runs_status").on(t.status),
+    index("idx_story_crawl_runs_mode").on(t.mode),
+    index("idx_story_crawl_runs_started").on(t.startedAt),
+    index("idx_story_crawl_runs_heartbeat").on(t.heartbeatAt),
+  ]
+);
+
+export const storyCrawlEvents = pgTable(
+  "story_crawl_events",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    runId: text("run_id").references(() => storyCrawlRuns.id, { onDelete: "set null" }),
+    eventType: varchar("event_type", { length: 100 }).notNull(),
+    level: varchar("level", { length: 20 }).notNull().default("info"),
+    message: text("message").notNull(),
+    storyId: text("story_id").references(() => storySources.id, { onDelete: "set null" }),
+    chapterId: text("chapter_id").references(() => storySourceChapters.id, { onDelete: "set null" }),
+    url: text("url"),
+    metadata: jsonb("metadata").$type<Record<string, unknown> | null>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("idx_story_crawl_events_run").on(t.runId),
+    index("idx_story_crawl_events_type").on(t.eventType),
+    index("idx_story_crawl_events_level").on(t.level),
+    index("idx_story_crawl_events_created").on(t.createdAt),
+  ]
+);
+
+export const storyCrawlRunsRelations = relations(storyCrawlRuns, ({ many, one }) => ({
+  events: many(storyCrawlEvents),
+  currentStory: one(storySources, { fields: [storyCrawlRuns.currentStoryId], references: [storySources.id] }),
+  currentChapter: one(storySourceChapters, { fields: [storyCrawlRuns.currentChapterId], references: [storySourceChapters.id] }),
+}));
+
+export const storyCrawlEventsRelations = relations(storyCrawlEvents, ({ one }) => ({
+  run: one(storyCrawlRuns, { fields: [storyCrawlEvents.runId], references: [storyCrawlRuns.id] }),
+  story: one(storySources, { fields: [storyCrawlEvents.storyId], references: [storySources.id] }),
+  chapter: one(storySourceChapters, { fields: [storyCrawlEvents.chapterId], references: [storySourceChapters.id] }),
+}));
+
+// ─── Story Studio Tables ────────────────────────────────────────────────────
+
+export const storyTaxonomy = pgTable(
+  "story_taxonomy",
+  {
+    id: serial("id").primaryKey(),
+    slug: varchar("slug", { length: 100 }).notNull().unique(),
+    name: varchar("name", { length: 200 }).notNull(),
+    parentId: integer("parent_id"),
+    level: integer("level").notNull().default(0),
+    description: text("description"),
+    hookStrength: integer("hook_strength").default(5),
+    retentionPotential: integer("retention_potential").default(5),
+    seriesPotential: integer("series_potential").default(5),
+    defaultTropes: jsonb("default_tropes").$type<string[]>().default([]),
+    sampleHooks: jsonb("sample_hooks").$type<string[]>().default([]),
+    sampleCoverTexts: jsonb("sample_cover_texts").$type<string[]>().default([]),
+    isActive: boolean("is_active").default(true).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("idx_story_taxonomy_parent").on(t.parentId), index("idx_story_taxonomy_level").on(t.level)]
+);
+
+export const stories = pgTable(
+  "stories",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    title: varchar("title", { length: 500 }).notNull().default("Untitled Story"),
+    status: varchar("status", { length: 50 }).notNull().default("idea"),
+    // Genre path & tropes
+    genrePath: jsonb("genre_path").$type<string[]>().default([]).notNull(),
+    tropeTags: jsonb("trope_tags").$type<string[]>().default([]).notNull(),
+    // Selected premise
+    selectedPremise: jsonb("selected_premise"),
+    premiseCandidates: jsonb("premise_candidates").$type<unknown[]>().default([]),
+    // Bible
+    storyBible: text("story_bible"),
+    characterBible: text("character_bible"),
+    systemRules: text("system_rules"),
+    worldRules: text("world_rules"),
+    forbiddenDirections: text("forbidden_directions"),
+    endingPromise: text("ending_promise"),
+    coreMysteries: jsonb("core_mysteries").$type<string[]>().default([]),
+    emotionalArc: text("emotional_arc"),
+    // Outline
+    chapterOutlines: jsonb("chapter_outlines").$type<unknown[]>().default([]),
+    outlineApproved: boolean("outline_approved").default(false).notNull(),
+    // Meta
+    totalChapters: integer("total_chapters").default(0).notNull(),
+    approvedChapters: integer("approved_chapters").default(0).notNull(),
+    notes: text("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("idx_stories_status").on(t.status), index("idx_stories_created").on(t.createdAt)]
+);
+
+export const storyCharacters = pgTable(
+  "story_characters",
+  {
+    id: serial("id").primaryKey(),
+    storyId: text("story_id").notNull().references(() => stories.id, { onDelete: "cascade" }),
+    name: varchar("name", { length: 200 }).notNull(),
+    role: varchar("role", { length: 50 }).notNull().default("supporting"),
+    setup: text("setup"),
+    personality: text("personality"),
+    backstory: text("backstory"),
+    goals: jsonb("goals").$type<string[]>().default([]),
+    secrets: jsonb("secrets").$type<string[]>().default([]),
+    relationships: jsonb("relationships").$type<Record<string, string>>().default({}),
+    arc: text("arc"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("idx_story_characters_story").on(t.storyId)]
+);
+
+export const storyChapters = pgTable(
+  "story_chapters",
+  {
+    id: serial("id").primaryKey(),
+    storyId: text("story_id").notNull().references(() => stories.id, { onDelete: "cascade" }),
+    chapterNumber: integer("chapter_number").notNull(),
+    title: varchar("title", { length: 500 }),
+    status: varchar("status", { length: 50 }).notNull().default("pending"),
+    // Outline
+    outline: jsonb("outline"),
+    // Draft
+    chapterText: text("chapter_text"),
+    chapterSummary: text("chapter_summary"),
+    newFacts: jsonb("new_facts").$type<string[]>().default([]),
+    relationshipChanges: jsonb("relationship_changes").$type<string[]>().default([]),
+    openThreadsUpdated: jsonb("open_threads_updated").$type<string[]>().default([]),
+    cliffhanger: text("cliffhanger"),
+    qualityNotes: jsonb("quality_notes").$type<string[]>().default([]),
+    // Quality check
+    qualityCheck: jsonb("quality_check"),
+    wordCount: integer("word_count").default(0),
+    approved: boolean("approved").default(false).notNull(),
+    locked: boolean("locked").default(false).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("idx_story_chapters_story").on(t.storyId),
+    uniqueIndex("uniq_story_chapter_number").on(t.storyId, t.chapterNumber),
+  ]
+);
+
+export const storyMemories = pgTable(
+  "story_memories",
+  {
+    id: serial("id").primaryKey(),
+    storyId: text("story_id").notNull().references(() => stories.id, { onDelete: "cascade" }),
+    chapterId: integer("chapter_id").references(() => storyChapters.id, { onDelete: "set null" }),
+    memoryType: varchar("memory_type", { length: 50 }).notNull().default("fact"),
+    content: text("content").notNull(),
+    tags: jsonb("tags").$type<string[]>().default([]),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("idx_story_memories_story").on(t.storyId)]
+);
+
+export const storyEpisodes = pgTable(
+  "story_episodes",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    storyId: text("story_id").notNull().references(() => stories.id, { onDelete: "cascade" }),
+    // Internal historical sequence number. Keep stable so existing asset paths and references remain valid.
+    episodeNumber: integer("episode_number").notNull(),
+    // production | short_pilot | smoke_test
+    episodeKind: varchar("episode_kind", { length: 30 }).notNull().default("production"),
+    // Separate public-facing production numbering that excludes smoke tests / pilots.
+    productionEpisodeNumber: integer("production_episode_number"),
+    title: varchar("title", { length: 500 }).notNull(),
+    chapterStart: integer("chapter_start").notNull(),
+    chapterEnd: integer("chapter_end").notNull(),
+    chapterIdsJson: jsonb("chapter_ids_json").$type<number[]>().default([]).notNull(),
+    scriptText: text("script_text"),
+    wordCount: integer("word_count").default(0).notNull(),
+    estimatedDurationMin: integer("estimated_duration_min").default(0).notNull(),
+    // status lifecycle: draft → ready_for_review → approved → locked → ready_for_tts
+    status: varchar("status", { length: 50 }).notNull().default("draft"),
+    approved: boolean("approved").default(false).notNull(),
+    locked: boolean("locked").default(false).notNull(),
+    creativeReviewStatus: varchar("creative_review_status", { length: 20 }).notNull().default("pending"),
+    creativeReviewNotes: text("creative_review_notes"),
+    creativeReviewedAt: timestamp("creative_reviewed_at", { withTimezone: true }),
+    creativeReviewHash: text("creative_review_hash"),
+    creativeReviewerLabel: varchar("creative_reviewer_label", { length: 120 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("idx_story_episodes_story").on(t.storyId),
+    index("idx_story_episodes_kind").on(t.storyId, t.episodeKind),
+    uniqueIndex("uniq_story_episode_number").on(t.storyId, t.episodeNumber),
+  ]
+);
+
+export const storyQualityChecks = pgTable(
+  "story_quality_checks",
+  {
+    id: serial("id").primaryKey(),
+    storyId: text("story_id").notNull().references(() => stories.id, { onDelete: "cascade" }),
+    chapterId: integer("chapter_id").notNull().references(() => storyChapters.id, { onDelete: "cascade" }),
+    passed: boolean("passed").notNull().default(false),
+    scores: jsonb("scores"),
+    issues: jsonb("issues").$type<Array<{ type: string; problem: string; fix: string }>>().default([]),
+    repairPrompt: text("repair_prompt"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("idx_story_quality_checks_chapter").on(t.chapterId)]
+);
+
+// Relations for story tables
+export const storiesRelations = relations(stories, ({ many }) => ({
+  characters: many(storyCharacters),
+  chapters: many(storyChapters),
+  memories: many(storyMemories),
+  episodes: many(storyEpisodes),
+  audioAssets: many(storyAudioAssets),
+  videoAssets: many(storyVideoAssets),
+  uploadPackages: many(storyUploadPackages),
+  uploadValidations: many(storyManualUploadValidations),
+}));
+
+export const storyChaptersRelations = relations(storyChapters, ({ one, many }) => ({
+  story: one(stories, { fields: [storyChapters.storyId], references: [stories.id] }),
+  qualityChecks: many(storyQualityChecks),
+  memories: many(storyMemories),
+}));
+
+export const storyCharactersRelations = relations(storyCharacters, ({ one }) => ({
+  story: one(stories, { fields: [storyCharacters.storyId], references: [stories.id] }),
+}));
+
+export const storyMemoriesRelations = relations(storyMemories, ({ one }) => ({
+  story: one(stories, { fields: [storyMemories.storyId], references: [stories.id] }),
+  chapter: one(storyChapters, { fields: [storyMemories.chapterId], references: [storyChapters.id] }),
+}));
+
+export const storyQualityChecksRelations = relations(storyQualityChecks, ({ one }) => ({
+  story: one(stories, { fields: [storyQualityChecks.storyId], references: [stories.id] }),
+  chapter: one(storyChapters, { fields: [storyQualityChecks.chapterId], references: [storyChapters.id] }),
+}));
+
+export const storyEpisodesRelations = relations(storyEpisodes, ({ one, many }) => ({
+  story: one(stories, { fields: [storyEpisodes.storyId], references: [stories.id] }),
+  audioAssets: many(storyAudioAssets),
+}));
+
+export const storyEpisodeMetadata = pgTable(
+  "story_episode_metadata",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    storyId: text("story_id").notNull().references(() => stories.id, { onDelete: "cascade" }),
+    episodeId: text("episode_id").notNull().references(() => storyEpisodes.id, { onDelete: "cascade" }),
+    seoTitle: text("seo_title").notNull(),
+    youtubeTitle: text("youtube_title").notNull(),
+    titleCandidatesJson: jsonb("title_candidates_json")
+      .$type<Array<{ type: "emotional" | "genre_search" | "curiosity_hook"; title: string }>>()
+      .default([])
+      .notNull(),
+    description: text("description").notNull(),
+    tagsJson: jsonb("tags_json").$type<string[]>().default([]).notNull(),
+    hashtagsJson: jsonb("hashtags_json").$type<string[]>().default([]).notNull(),
+    pinnedComment: text("pinned_comment").notNull(),
+    playlistTitle: text("playlist_title").notNull(),
+    playlistPosition: integer("playlist_position").notNull(),
+    authorName: text("author_name").notNull(),
+    genreText: text("genre_text").notNull(),
+    episodeLabel: text("episode_label").notNull(),
+    chapterRangeText: text("chapter_range_text").notNull(),
+    targetChannelId: text("target_channel_id"),
+    targetChannelName: text("target_channel_name"),
+    targetChannelHandle: text("target_channel_handle"),
+    generatedAt: timestamp("generated_at", { withTimezone: true }).defaultNow().notNull(),
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    approved: boolean("approved").default(false).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("idx_story_episode_metadata_story").on(t.storyId),
+    uniqueIndex("uniq_story_episode_metadata_episode").on(t.episodeId),
+  ]
+);
+
+export const storyEpisodeMetadataRelations = relations(storyEpisodeMetadata, ({ one }) => ({
+  story: one(stories, { fields: [storyEpisodeMetadata.storyId], references: [stories.id] }),
+  episode: one(storyEpisodes, { fields: [storyEpisodeMetadata.episodeId], references: [storyEpisodes.id] }),
+}));
+
+export const storyAudioAssets = pgTable(
+  "story_audio_assets",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    storyId: text("story_id").notNull().references(() => stories.id, { onDelete: "cascade" }),
+    episodeId: text("episode_id").references(() => storyEpisodes.id, { onDelete: "cascade" }),
+    provider: varchar("provider", { length: 50 }).notNull(),
+    model: varchar("model", { length: 100 }),
+    voiceId: varchar("voice_id", { length: 200 }).notNull(),
+    voiceLabel: varchar("voice_label", { length: 200 }),
+    sampleRate: integer("sample_rate"),
+    language: varchar("language", { length: 50 }),
+    speed: numeric("speed", { precision: 5, scale: 3 }),
+    pitch: numeric("pitch", { precision: 5, scale: 2 }),
+    volume: numeric("volume", { precision: 5, scale: 3 }),
+    audioPath: text("audio_path"),
+    srtPath: text("srt_path"),
+    durationSec: numeric("duration_sec", { precision: 10, scale: 2 }),
+    wordCount: integer("word_count"),
+    ttsJobId: text("tts_job_id"),
+    cacheKey: text("cache_key"),
+    // status: pending | generating | ready | failed
+    status: varchar("status", { length: 50 }).notNull().default("pending"),
+    errorMessage: text("error_message"),
+    isDryRun: boolean("is_dry_run").default(false).notNull(),
+    generatedAt: timestamp("generated_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("idx_story_audio_assets_story").on(t.storyId),
+    index("idx_story_audio_assets_episode").on(t.episodeId),
+  ]
+);
+
+export const storyAudioAssetsRelations = relations(storyAudioAssets, ({ one }) => ({
+  story: one(stories, { fields: [storyAudioAssets.storyId], references: [stories.id] }),
+  episode: one(storyEpisodes, { fields: [storyAudioAssets.episodeId], references: [storyEpisodes.id] }),
+}));
+
+export const storyVideoAssets = pgTable(
+  "story_video_assets",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    storyId: text("story_id").notNull().references(() => stories.id, { onDelete: "cascade" }),
+    episodeId: text("episode_id").notNull().references(() => storyEpisodes.id, { onDelete: "cascade" }),
+    audioAssetId: text("audio_asset_id").references(() => storyAudioAssets.id, { onDelete: "set null" }),
+    videoPath: text("video_path"),
+    thumbnailPath: text("thumbnail_path"),
+    coverImagePath: text("cover_image_path"),
+    sidecarSrtPath: text("sidecar_srt_path"),
+    // status: pending | rendering | ready | failed
+    renderStatus: varchar("render_status", { length: 50 }).notNull().default("pending"),
+    renderError: text("render_error"),
+    durationSec: numeric("duration_sec", { precision: 10, scale: 2 }),
+    width: integer("width"),
+    height: integer("height"),
+    fps: integer("fps"),
+    codec: varchar("codec", { length: 50 }),
+    audioCodec: varchar("audio_codec", { length: 50 }),
+    fileSizeBytes: bigint("file_size_bytes", { mode: "number" }),
+    // subtitle_mode: sidecar (SRT copied next to MP4, no burn-in)
+    subtitleMode: varchar("subtitle_mode", { length: 50 }).default("sidecar"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("idx_story_video_assets_story").on(t.storyId),
+    index("idx_story_video_assets_episode").on(t.episodeId),
+  ]
+);
+
+export const storyVideoAssetsRelations = relations(storyVideoAssets, ({ one }) => ({
+  story: one(stories, { fields: [storyVideoAssets.storyId], references: [stories.id] }),
+  episode: one(storyEpisodes, { fields: [storyVideoAssets.episodeId], references: [storyEpisodes.id] }),
+  audioAsset: one(storyAudioAssets, { fields: [storyVideoAssets.audioAssetId], references: [storyAudioAssets.id] }),
+}));
+
+export const storyUploadPackages = pgTable(
+  "story_upload_packages",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    storyId: text("story_id").notNull().references(() => stories.id, { onDelete: "cascade" }),
+    episodeId: text("episode_id").notNull().references(() => storyEpisodes.id, { onDelete: "cascade" }),
+    videoAssetId: text("video_asset_id").references(() => storyVideoAssets.id, { onDelete: "set null" }),
+    packageDir: text("package_dir"),
+    packageZipPath: text("package_zip_path"),
+    title: text("title"),
+    description: text("description"),
+    tagsJson: jsonb("tags_json").$type<string[]>().default([]),
+    playlistTitle: text("playlist_title"),
+    playlistPosition: integer("playlist_position"),
+    pinnedComment: text("pinned_comment"),
+    videoPath: text("video_path"),
+    subtitlePath: text("subtitle_path"),
+    thumbnailPath: text("thumbnail_path"),
+    metadataPath: text("metadata_path"),
+    // status: draft | ready | failed
+    status: varchar("status", { length: 50 }).notNull().default("draft"),
+    errorMessage: text("error_message"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("idx_story_upload_packages_story").on(t.storyId),
+    index("idx_story_upload_packages_episode").on(t.episodeId),
+  ]
+);
+
+export const storyUploadPackagesRelations = relations(storyUploadPackages, ({ one }) => ({
+  story: one(stories, { fields: [storyUploadPackages.storyId], references: [stories.id] }),
+  episode: one(storyEpisodes, { fields: [storyUploadPackages.episodeId], references: [storyEpisodes.id] }),
+  videoAsset: one(storyVideoAssets, { fields: [storyUploadPackages.videoAssetId], references: [storyVideoAssets.id] }),
+}));
+
+export const storyManualUploadValidations = pgTable(
+  "story_manual_upload_validations",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    storyId: text("story_id").notNull().references(() => stories.id, { onDelete: "cascade" }),
+    episodeId: text("episode_id").notNull().references(() => storyEpisodes.id, { onDelete: "cascade" }),
+    uploadPackageId: text("upload_package_id").references(() => storyUploadPackages.id, { onDelete: "set null" }),
+    youtubeVideoUrl: text("youtube_video_url"),
+    youtubeVideoId: text("youtube_video_id"),
+    youtubePlaylistUrl: text("youtube_playlist_url"),
+    youtubePlaylistId: text("youtube_playlist_id"),
+    // not_uploaded | uploaded_private | uploaded_unlisted | uploaded_public | failed | needs_fix
+    uploadStatus: varchar("upload_status", { length: 50 }).notNull().default("not_uploaded"),
+    // private | unlisted | public
+    visibility: varchar("visibility", { length: 50 }),
+    titleOk: boolean("title_ok").notNull().default(false),
+    thumbnailOk: boolean("thumbnail_ok").notNull().default(false),
+    srtOk: boolean("srt_ok").notNull().default(false),
+    audioOk: boolean("audio_ok").notNull().default(false),
+    descriptionOk: boolean("description_ok").notNull().default(false),
+    // clean | no_claim | claimed | blocked
+    copyrightStatus: varchar("copyright_status", { length: 50 }),
+    // none | age_restricted | country_blocked | other
+    restrictionStatus: varchar("restriction_status", { length: 50 }),
+    validationNotes: text("validation_notes"),
+    uploadedAt: timestamp("uploaded_at", { withTimezone: true }),
+    validatedAt: timestamp("validated_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("idx_story_manual_upload_validations_story").on(t.storyId),
+    index("idx_story_manual_upload_validations_episode").on(t.episodeId),
+  ]
+);
+
+export const storyManualUploadValidationsRelations = relations(storyManualUploadValidations, ({ one }) => ({
+  story: one(stories, { fields: [storyManualUploadValidations.storyId], references: [stories.id] }),
+  episode: one(storyEpisodes, { fields: [storyManualUploadValidations.episodeId], references: [storyEpisodes.id] }),
+  uploadPackage: one(storyUploadPackages, { fields: [storyManualUploadValidations.uploadPackageId], references: [storyUploadPackages.id] }),
+}));
+
+// Type exports for story tables
+export type StorySource = typeof storySources.$inferSelect;
+export type NewStorySource = typeof storySources.$inferInsert;
+export type StorySourceChapter = typeof storySourceChapters.$inferSelect;
+export type NewStorySourceChapter = typeof storySourceChapters.$inferInsert;
+export type StoryCrawlRun = typeof storyCrawlRuns.$inferSelect;
+export type NewStoryCrawlRun = typeof storyCrawlRuns.$inferInsert;
+export type StoryCrawlEvent = typeof storyCrawlEvents.$inferSelect;
+export type NewStoryCrawlEvent = typeof storyCrawlEvents.$inferInsert;
+export type StoryTaxonomy = typeof storyTaxonomy.$inferSelect;
+export type NewStoryTaxonomy = typeof storyTaxonomy.$inferInsert;
+export type Story = typeof stories.$inferSelect;
+export type NewStory = typeof stories.$inferInsert;
+export type StoryCharacter = typeof storyCharacters.$inferSelect;
+export type NewStoryCharacter = typeof storyCharacters.$inferInsert;
+export type StoryChapter = typeof storyChapters.$inferSelect;
+export type NewStoryChapter = typeof storyChapters.$inferInsert;
+export type StoryMemory = typeof storyMemories.$inferSelect;
+export type NewStoryMemory = typeof storyMemories.$inferInsert;
+export type StoryQualityCheck = typeof storyQualityChecks.$inferSelect;
+export type NewStoryQualityCheck = typeof storyQualityChecks.$inferInsert;
+export type StoryEpisode = typeof storyEpisodes.$inferSelect;
+export type NewStoryEpisode = typeof storyEpisodes.$inferInsert;
+export type StoryEpisodeMetadata = typeof storyEpisodeMetadata.$inferSelect;
+export type NewStoryEpisodeMetadata = typeof storyEpisodeMetadata.$inferInsert;
+export type StoryAudioAsset = typeof storyAudioAssets.$inferSelect;
+export type NewStoryAudioAsset = typeof storyAudioAssets.$inferInsert;
+export type StoryVideoAsset = typeof storyVideoAssets.$inferSelect;
+export type NewStoryVideoAsset = typeof storyVideoAssets.$inferInsert;
+export type StoryUploadPackage = typeof storyUploadPackages.$inferSelect;
+export type NewStoryUploadPackage = typeof storyUploadPackages.$inferInsert;
+export type StoryManualUploadValidation = typeof storyManualUploadValidations.$inferSelect;
+export type NewStoryManualUploadValidation = typeof storyManualUploadValidations.$inferInsert;
+
+/**
+ * Generation Cost Events — generic cost ledger for all pipeline providers.
+ * One row per cost event (TTS request, image generation, LLM call, etc.).
+ * All amounts in VND. source_table + source_id link back to origin rows.
+ */
+export const generationCostEvents = pgTable(
+  "generation_cost_events",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    contentId: text("content_id"),
+    provider: varchar("provider", { length: 50 }).notNull(),
+    costType: varchar("cost_type", { length: 30 }).notNull(),
+    pipelineRoute: varchar("pipeline_route", { length: 80 }),
+    contentProfileKey: text("content_profile_key"),
+    nicheName: text("niche_name"),
+    formatType: text("format_type"),
+    sourceTable: varchar("source_table", { length: 60 }),
+    sourceId: text("source_id"),
+    status: varchar("status", { length: 20 }).notNull().default("done"),
+    usageUnit: varchar("usage_unit", { length: 20 }),
+    usageAmount: numeric("usage_amount", { precision: 18, scale: 4 }),
+    unitCostVnd: numeric("unit_cost_vnd", { precision: 14, scale: 6 }),
+    costVnd: numeric("cost_vnd", { precision: 14, scale: 4 }),
+    costSource: varchar("cost_source", { length: 30 }).notNull().default("unknown"),
+    currency: varchar("currency", { length: 10 }).notNull().default("VND"),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("uniq_cost_events_source").on(table.sourceTable, table.sourceId),
+    index("idx_cost_events_content_id").on(table.contentId, table.createdAt),
+    index("idx_cost_events_provider_created").on(table.provider, table.createdAt),
+    index("idx_cost_events_cost_type_created").on(table.costType, table.createdAt),
+    index("idx_cost_events_pipeline_route").on(table.pipelineRoute, table.createdAt),
+    index("idx_cost_events_niche_name").on(table.nicheName, table.createdAt),
+  ]
+);
+
+export type GenerationCostEvent = typeof generationCostEvents.$inferSelect;
+export type NewGenerationCostEvent = typeof generationCostEvents.$inferInsert;
 
 // Type exports
 export type GeneratedContent = typeof generatedContents.$inferSelect;

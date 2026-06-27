@@ -3,7 +3,7 @@
 import { useRef, useState, useEffect } from "react";
 import {
   Lock, LockOpen, Eye, Settings2, Trash2,
-  Mic, MonitorPlay, Video, Image, Share2, Film,
+  Mic, MonitorPlay, Video, Image as ImageIcon, Share2, Film,
   Play, Pause, Loader2, AlertCircle,
   MoreHorizontal, TvMinimalPlay as Youtube, ExternalLink, TrendingUp, CalendarPlus, RefreshCcw,
 } from "lucide-react";
@@ -40,7 +40,7 @@ function getSteps(g: ContentGenerationRow, activeTab: ContentTab): StepConfig[] 
         actionKey: "tts",
       },
       {
-        label: "Ảnh", icon: <Image className="h-3 w-3" />,
+        label: "Ảnh", icon: <ImageIcon className="h-3 w-3" />,
         status: !afterTts ? "skipped" : imgs === "done" ? "done" : imgs === "processing" ? "processing" : imgs === "error" ? "error" : "pending",
         detail: imgs === "error" ? (g.longImagesErrorMessage ?? undefined) : undefined,
         actionKey: "longImages",
@@ -78,7 +78,7 @@ function getSteps(g: ContentGenerationRow, activeTab: ContentTab): StepConfig[] 
       actionKey: "tts",
     },
     {
-      label: "Ảnh", icon: <Image className="h-3 w-3" />,
+      label: "Ảnh", icon: <ImageIcon className="h-3 w-3" />,
       status: !afterTts ? "skipped" : imgs === "done" ? "done" : imgs === "processing" ? "processing" : imgs === "error" ? "error" : "pending",
       detail: imgs === "error" ? (g.imagesErrorMessage ?? undefined) : undefined,
       actionKey: "images",
@@ -663,6 +663,15 @@ export function ContentGalleryCard({
           <p className="text-sm font-medium text-slate-200 truncate leading-snug">{g.topic}</p>
           <div className="flex items-center gap-2 mt-0.5 flex-wrap">
             <span className="text-xs text-slate-500">{g.nicheName}</span>
+            <span className="text-slate-700">·</span>
+            <button
+              type="button"
+              title={`ID: ${g.id}\nClick để sao chép`}
+              onClick={(e) => { e.stopPropagation(); void navigator.clipboard.writeText(g.id); }}
+              className="font-mono text-[10px] text-slate-600 border border-slate-800 rounded px-1 py-px hover:text-slate-300 hover:border-slate-600 transition-colors leading-none"
+            >
+              {g.id.slice(0, 8)}
+            </button>
             <span className="text-slate-700">·</span>
             {activeTab === "short" ? (
               <span className="text-[11px] text-slate-600">

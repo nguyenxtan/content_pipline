@@ -28,6 +28,10 @@ RUN pip install --no-cache-dir \
     "numpy" \
     "onnxruntime"
 
+# Whisper word-timestamp support for deterministic punctuation pause injection
+# faster-whisper 1.1.1 — stable ctranslate2 4.x, arm64 manylinux wheel available
+RUN pip install --no-cache-dir "faster-whisper==1.1.1"
+
 COPY server.py .
 
 ENV TTS_PORT=8765

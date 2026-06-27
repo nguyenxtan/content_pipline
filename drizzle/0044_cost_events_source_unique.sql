@@ -1,0 +1,5 @@
+-- No-op: the pre-existing partial unique index uniq_cost_events_source already covers
+-- (source_table, source_id) WHERE NOT NULL. The writeCostEvent upsert was fixed in
+-- src/lib/cost/write-cost-event.ts to use select-then-update instead of onConflictDoUpdate,
+-- which cannot target partial indexes via Drizzle ORM.
+-- This file is kept as a record of the E3 investigation.

@@ -1,5 +1,5 @@
-import { TtsSettingsClient } from "@/components/settings/tts-settings-client";
-export const dynamic = "force-dynamic";
-export default function TtsSettingsPage() {
-  return <TtsSettingsClient />;
+import { redirect } from "next/navigation";
+
+export default function TtsSettingsIndexPage() {
+  redirect("/settings/tts/aimax");
 }

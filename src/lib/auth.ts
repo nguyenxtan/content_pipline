@@ -46,8 +46,9 @@ export async function isAuthenticated(): Promise<boolean> {
   return token === expected;
 }
 
-export function checkPassword(password: string): boolean {
-  const expected = process.env.APP_PASSWORD;
-  if (!expected) return false;
-  return password === expected;
+export function checkCredentials(username: string, password: string): boolean {
+  const expectedUser = process.env.ADMIN_USERNAME ?? "admin";
+  const expectedPass = process.env.APP_PASSWORD;
+  if (!expectedPass) return false;
+  return username === expectedUser && password === expectedPass;
 }

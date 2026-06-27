@@ -15,13 +15,25 @@ import {
 import {
   buildPublishingAnalyticsReportAction,
   getAnalyticsReportConfigAction,
+  getHookPerformanceAction,
+  getHookTypePerformanceAction,
   getPublishingAnalyticsAction,
+  getStrategicFamilyCoverageAction,
+  getTopicCoverageReportAction,
+  getTopicPerformanceAction,
+  getTopicPerformanceSummaryAction,
   saveAnalyticsReportConfigAction,
   syncFacebookAnalyticsAction,
   syncYouTubeAnalyticsAction,
   type AnalyticsReportConfig,
   type AnalyticsReportPeriod,
+  type HookPerformanceRow,
+  type HookTypePerformanceRow,
   type PublishingAnalyticsPayload,
+  type StrategicFamilyCoverageRow,
+  type TopicCoverageClusterRow,
+  type TopicPerformanceRow,
+  type TopicPerformanceSummary,
 } from "@/actions/publishing-analytics";
 
 type PlatformKey = PublishingAnalyticsPayload["selectedPlatform"];
@@ -38,6 +50,10 @@ const REPORT_PERIOD_OPTIONS: Array<{ key: AnalyticsReportPeriod; label: string }
   { key: "30d", label: "30 ngày" },
   { key: "monthly", label: "Tháng trước" },
 ];
+
+function getReportPeriodLabel(period: AnalyticsReportPeriod): string {
+  return REPORT_PERIOD_OPTIONS.find((option) => option.key === period)?.label ?? period;
+}
 
 function formatNumber(value: number): string {
   return new Intl.NumberFormat("vi-VN").format(value);
@@ -100,12 +116,46 @@ function SummaryCard({
   );
 }
 
+function AnalyticsScopeBadge({
+  label,
+  tone = "slate",
+}: {
+  label: string;
+  tone?: "slate" | "rose";
+}) {
+  const className = tone === "rose"
+    ? "border-rose-700/40 bg-rose-950/20 text-rose-200"
+    : "border-slate-700 bg-slate-950 text-slate-400";
+
+  return (
+    <span className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] ${className}`}>
+      {label}
+    </span>
+  );
+}
+
 export function PublishingAnalyticsClient({
   initialData,
+  initialTopics,
+  initialTopicSummary,
+  initialTopicCoverage,
+  initialHookPerformance,
+  initialStrategicCoverage,
 }: {
   initialData: PublishingAnalyticsPayload;
+  initialTopics: TopicPerformanceRow[];
+  initialTopicSummary: TopicPerformanceSummary;
+  initialTopicCoverage: TopicCoverageClusterRow[];
+  initialHookPerformance: HookPerformanceRow[];
+  initialStrategicCoverage: StrategicFamilyCoverageRow[];
 }) {
   const [data, setData] = useState(initialData);
+  const [topics, setTopics] = useState(initialTopics);
+  const [topicSummary, setTopicSummary] = useState(initialTopicSummary);
+  const [topicCoverage, setTopicCoverage] = useState(initialTopicCoverage);
+  const [hookPerformance, setHookPerformance] = useState(initialHookPerformance);
+  const [hookTypePerformance, setHookTypePerformance] = useState<HookTypePerformanceRow[]>([]);
+  const [strategicCoverage, setStrategicCoverage] = useState(initialStrategicCoverage);
   const [selectedPlatform, setSelectedPlatform] = useState<PlatformKey>(
     initialData.selectedPlatform
   );
@@ -119,22 +169,83 @@ export function PublishingAnalyticsClient({
   const [reportPreview, setReportPreview] = useState("");
   const [reportBusy, setReportBusy] = useState(false);
   const [reportSaved, setReportSaved] = useState(false);
+  const [topicSort, setTopicSort] = useState<"retention" | "views">("retention");
+
+  // Load hook type performance on mount
+  useEffect(() => {
+    getHookTypePerformanceAction({
+      platform: selectedPlatform,
+      platformAccountId: selectedAccountId,
+    }).then(setHookTypePerformance).catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const selectedPlatformSummary = useMemo(
     () => data.platforms.find((platform) => platform.platform === selectedPlatform),
     [data.platforms, selectedPlatform]
   );
 
+  const sortedTopics = useMemo(() => {
+    return [...topics].sort((a, b) => {
+      if (topicSort === "views") {
+        if (b.avgViews !== a.avgViews) return b.avgViews - a.avgViews;
+      } else {
+        const aRetention = a.avgRetentionPct ?? -1;
+        const bRetention = b.avgRetentionPct ?? -1;
+        if (bRetention !== aRetention) return bRetention - aRetention;
+      }
+
+      if (b.videoCount !== a.videoCount) return b.videoCount - a.videoCount;
+      return a.topic.localeCompare(b.topic, "vi");
+    });
+  }, [topicSort, topics]);
+
+  const lowConfidenceRatio = useMemo(() => {
+    if (topics.length === 0) return 0;
+    const lowConfidenceCount = topics.filter((row) => row.videoCount < 2).length;
+    return lowConfidenceCount / topics.length;
+  }, [topics]);
+
   const reload = useCallback(
     async (platform: PlatformKey, platformAccountId: number | null) => {
       setLoading(true);
       try {
-        const next = await getPublishingAnalyticsAction({
-          platform,
-          platformAccountId,
-          limit: 120,
-        });
+        const [next, nextTopics, nextTopicSummary, nextTopicCoverage, nextHookPerformance, nextStrategicCoverage, nextHookTypePerformance] = await Promise.all([
+          getPublishingAnalyticsAction({
+            platform,
+            platformAccountId,
+            limit: 120,
+          }),
+          getTopicPerformanceAction({
+            platform,
+            platformAccountId,
+            limit: 50,
+          }),
+          getTopicPerformanceSummaryAction({
+            platform,
+            platformAccountId,
+            limit: 100,
+          }),
+          getTopicCoverageReportAction({
+            platform,
+            platformAccountId,
+            limit: 100,
+          }),
+          getHookPerformanceAction({
+            platform,
+            platformAccountId,
+            limit: 100,
+          }),
+          getStrategicFamilyCoverageAction(),
+          getHookTypePerformanceAction({ platform, platformAccountId }),
+        ]);
         setData(next);
+        setTopics(nextTopics);
+        setTopicSummary(nextTopicSummary);
+        setTopicCoverage(nextTopicCoverage);
+        setHookPerformance(nextHookPerformance);
+        setStrategicCoverage(nextStrategicCoverage);
+        setHookTypePerformance(nextHookTypePerformance);
         setSelectedPlatform(platform);
         setSelectedAccountId(platformAccountId);
       } finally {
@@ -452,11 +563,537 @@ export function PublishingAnalyticsClient({
         ) : null}
 
         <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/80 p-4">
-          <p className="mb-2 text-xs uppercase tracking-wide text-slate-500">Preview</p>
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <p className="text-xs uppercase tracking-wide text-slate-500">Preview</p>
+            <AnalyticsScopeBadge
+              label={`Theo kỳ đã chọn: ${getReportPeriodLabel(reportConfig?.period ?? "7d")}`}
+              tone="rose"
+            />
+          </div>
           <pre className="whitespace-pre-wrap text-xs leading-6 text-slate-300">
             {reportPreview || "Chưa có bản phân tích nào được tạo trong phiên này."}
           </pre>
         </div>
+      </div>
+
+      <div className="mt-8 overflow-hidden rounded-xl border border-slate-800">
+        <div className="border-b border-slate-800 bg-slate-950/50 px-4 py-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <p className="text-sm font-medium text-slate-100">Topic performance summary</p>
+              <p className="mt-1 text-xs text-slate-500">
+                Bản đọc nhanh từ dữ liệu analytics hiện có. Chưa feed ngược vào prompt hay generation.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <AnalyticsScopeBadge label="Latest snapshot · toàn bộ video đã publish" />
+              {lowConfidenceRatio >= 0.5 ? (
+                <div className="rounded-lg border border-amber-700/50 bg-amber-950/20 px-3 py-2 text-xs text-amber-300">
+                  Low confidence: {Math.round(lowConfidenceRatio * 100)}% topic hiện mới có dưới 2 video.
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4 xl:grid-cols-3">
+            {[
+              { label: "High Performers", rows: topicSummary.highPerformers, tone: "emerald" },
+              { label: "Medium Performers", rows: topicSummary.mediumPerformers, tone: "slate" },
+              { label: "Low Performers", rows: topicSummary.lowPerformers, tone: "amber" },
+            ].map((group) => (
+              <div
+                key={group.label}
+                className={`rounded-lg border px-4 py-3 ${
+                  group.tone === "emerald"
+                    ? "border-emerald-800/60 bg-emerald-950/10"
+                    : group.tone === "amber"
+                      ? "border-amber-800/60 bg-amber-950/10"
+                      : "border-slate-800 bg-slate-900/50"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs font-medium uppercase tracking-wide text-slate-300">
+                    {group.label}
+                  </p>
+                  <span className="text-xs text-slate-500">{group.rows.length} topic</span>
+                </div>
+                <div className="mt-3 space-y-2">
+                  {group.rows.length === 0 ? (
+                    <p className="text-xs text-slate-500">Chưa có dữ liệu.</p>
+                  ) : (
+                    group.rows.slice(0, 5).map((row) => (
+                      <div key={`${group.label}-${row.topic}`} className="rounded-md border border-slate-800/80 bg-slate-950/40 px-3 py-2">
+                        <p className="line-clamp-2 text-sm text-slate-100">{row.topic}</p>
+                        <p className="mt-1 text-[11px] text-slate-500">
+                          {formatNumber(row.avgViews)} views · {row.avgRetentionPct == null ? "—" : `${row.avgRetentionPct.toFixed(2)}%`} retention · {row.videoCount} video
+                        </p>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-4 grid gap-4 lg:grid-cols-2">
+            <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+              <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Top Keywords</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {topicSummary.topKeywords.length === 0 ? (
+                  <span className="text-xs text-slate-500">Chưa có keyword nổi trội.</span>
+                ) : (
+                  topicSummary.topKeywords.map((keyword) => (
+                    <span
+                      key={`top-${keyword}`}
+                      className="inline-flex rounded-full border border-emerald-700/40 bg-emerald-950/20 px-3 py-1 text-xs text-emerald-300"
+                    >
+                      {keyword}
+                    </span>
+                  ))
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+              <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Weak Keywords</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {topicSummary.weakKeywords.length === 0 ? (
+                  <span className="text-xs text-slate-500">Chưa có keyword yếu rõ ràng.</span>
+                ) : (
+                  topicSummary.weakKeywords.map((keyword) => (
+                    <span
+                      key={`weak-${keyword}`}
+                      className="inline-flex rounded-full border border-amber-700/40 bg-amber-950/20 px-3 py-1 text-xs text-amber-300"
+                    >
+                      {keyword}
+                    </span>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Observations</p>
+            <div className="mt-3 space-y-2">
+              {topicSummary.observations.length === 0 ? (
+                <p className="text-sm text-slate-500">Chưa có observation nào để hiển thị.</p>
+              ) : (
+                topicSummary.observations.map((item, index) => (
+                  <div key={`obs-${index}`} className="rounded-md border border-slate-800/80 bg-slate-950/40 px-3 py-2 text-sm text-slate-300">
+                    {item}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+
+        {strategicCoverage.length > 0 && (
+          <div className="border-b border-slate-800 bg-slate-900/50 px-4 py-4">
+            <div className="mb-3 flex flex-col gap-1">
+              <p className="text-sm font-medium text-slate-100">Phật pháp — Strategic family coverage</p>
+              <p className="text-xs text-slate-500">
+                Độ phủ theo nhóm chủ đề chiến lược (phat_phap). Dựa trên <code className="text-[11px]">content_generations.topic_family</code> — bao gồm cả video và quote/photo. Không tính retention.
+              </p>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[900px] text-sm">
+                <thead className="bg-slate-950/60">
+                  <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wide text-slate-500">
+                    <th className="px-4 py-2">Family</th>
+                    <th className="px-4 py-2">Sprint</th>
+                    <th className="px-4 py-2">Sample depth</th>
+                    <th className="px-4 py-2">Total</th>
+                    <th className="px-4 py-2">7d</th>
+                    <th className="px-4 py-2">30d</th>
+                    <th className="px-4 py-2">Video / Quote</th>
+                    <th className="px-4 py-2">Topics (sample)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {strategicCoverage.map((row) => {
+                    const sprintColors: Record<string, string> = {
+                      Focus: "border-rose-600/50 bg-rose-900/20 text-rose-300",
+                      Secondary: "border-amber-600/40 bg-amber-900/15 text-amber-300",
+                      Explore: "border-sky-700/40 bg-sky-900/10 text-sky-300",
+                      "Low priority": "border-slate-700 bg-slate-900/20 text-slate-400",
+                      "Needs review": "border-slate-700 bg-slate-900/10 text-slate-500",
+                    };
+                    const depthColors: Record<string, string> = {
+                      "No data": "text-slate-600",
+                      "Too thin": "text-rose-400",
+                      "Early signal": "text-amber-400",
+                      "Usable signal": "text-yellow-300",
+                      "Decision-ready": "text-emerald-300",
+                      "Strong sample": "text-emerald-400",
+                    };
+                    return (
+                      <tr key={row.familyId} className="border-b border-slate-900/80 align-top">
+                        <td className="px-4 py-2">
+                          <p className="font-medium text-slate-100">{row.displayName}</p>
+                          <p className="text-[10px] text-slate-600">{row.familyId}</p>
+                        </td>
+                        <td className="px-4 py-2">
+                          {row.sprintLabel ? (
+                            <span className={`inline-flex rounded border px-2 py-0.5 text-[11px] ${sprintColors[row.sprintLabel] ?? ""}`}>
+                              {row.sprintLabel}
+                            </span>
+                          ) : "—"}
+                        </td>
+                        <td className="px-4 py-2">
+                          <span className={`text-sm font-medium ${depthColors[row.sampleDepthStatus] ?? "text-slate-300"}`}>
+                            {row.sampleDepthStatus}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2 text-slate-100">{row.sampleDepth.total}</td>
+                        <td className="px-4 py-2 text-slate-300">{row.sampleDepth.last7d}</td>
+                        <td className="px-4 py-2 text-slate-300">{row.sampleDepth.last30d}</td>
+                        <td className="px-4 py-2 text-slate-400 text-[12px]">
+                          {row.videoCount.total}v / {row.quoteCount.total}q
+                          <span className="ml-1 text-[10px] text-slate-600">(7d: {row.videoCount.last7d}v/{row.quoteCount.last7d}q)</span>
+                        </td>
+                        <td className="px-4 py-2">
+                          <div className="flex flex-wrap gap-1">
+                            {row.topics.slice(0, 4).map((t) => (
+                              <span key={t} className="inline-flex rounded-full border border-slate-700 bg-slate-950/60 px-2 py-0.5 text-[10px] text-slate-400">
+                                {t}
+                              </span>
+                            ))}
+                            {row.topics.length > 4 && (
+                              <span className="inline-flex rounded-full border border-slate-700 bg-slate-950/60 px-2 py-0.5 text-[10px] text-slate-600">
+                                +{row.topics.length - 4}
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        <div className="border-b border-slate-800 bg-slate-900/50 px-4 py-4">
+          <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <p className="text-sm font-medium text-slate-100">Topic coverage report</p>
+              <p className="mt-1 text-xs text-slate-500">
+                Đo độ phủ dữ liệu theo cụm chủ đề để biết cluster nào còn thiếu mẫu. Chỉ để review, chưa tác động generation.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+              <AnalyticsScopeBadge label="Latest snapshot · toàn bộ video đã publish" />
+              <span>Under-sampled: dưới 5 video · Well-sampled: từ 5 video</span>
+            </div>
+          </div>
+
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full min-w-[960px] text-sm">
+              <thead className="bg-slate-950/60">
+                <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wide text-slate-500">
+                  <th className="px-4 py-3">Cluster</th>
+                  <th className="px-4 py-3">Coverage</th>
+                  <th className="px-4 py-3">Video count</th>
+                  <th className="px-4 py-3">Avg views</th>
+                  <th className="px-4 py-3">Avg retention</th>
+                  <th className="px-4 py-3">Avg watch duration</th>
+                  <th className="px-4 py-3">Topics</th>
+                </tr>
+              </thead>
+              <tbody>
+                {topicCoverage.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-8 text-sm text-slate-500">
+                      Chưa có dữ liệu topic coverage cho bộ lọc hiện tại.
+                    </td>
+                  </tr>
+                ) : (
+                  topicCoverage.map((cluster) => {
+                    const wellSampled = cluster.videoCount >= 5;
+                    return (
+                      <tr
+                        key={cluster.clusterName}
+                        className={`border-b border-slate-900/80 align-top ${
+                          wellSampled ? "bg-emerald-950/5" : "bg-amber-950/10"
+                        }`}
+                      >
+                        <td className="px-4 py-3">
+                          <div className="space-y-1">
+                            <p className="text-sm font-medium text-slate-100">{cluster.clusterName}</p>
+                            <p className="text-[11px] text-slate-500">{cluster.topicCount} topic</p>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span
+                            className={`inline-flex rounded-md border px-2 py-1 text-[11px] ${
+                              wellSampled
+                                ? "border-emerald-700/50 bg-emerald-900/20 text-emerald-300"
+                                : "border-amber-700/50 bg-amber-900/20 text-amber-300"
+                            }`}
+                          >
+                            {wellSampled ? "Well-sampled" : "Under-sampled"}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-sm text-slate-100">{formatNumber(cluster.videoCount)}</td>
+                        <td className="px-4 py-3 text-sm text-slate-100">{formatNumber(cluster.avgViews)}</td>
+                        <td className="px-4 py-3 text-sm text-slate-300">
+                          {cluster.avgRetentionPct == null ? "—" : `${cluster.avgRetentionPct.toFixed(2)}%`}
+                        </td>
+                        <td className="px-4 py-3 text-sm text-slate-300">
+                          {formatDuration(cluster.avgWatchDurationSec)}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex max-w-[360px] flex-wrap gap-1.5">
+                            {cluster.topics.slice(0, 6).map((topic) => (
+                              <span
+                                key={`${cluster.clusterName}-${topic}`}
+                                className="inline-flex rounded-full border border-slate-700 bg-slate-950/70 px-2 py-1 text-[11px] text-slate-300"
+                              >
+                                {topic}
+                              </span>
+                            ))}
+                            {cluster.topics.length > 6 ? (
+                              <span className="inline-flex rounded-full border border-slate-700 bg-slate-950/70 px-2 py-1 text-[11px] text-slate-500">
+                                +{cluster.topics.length - 6} topic
+                              </span>
+                            ) : null}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-3 border-b border-slate-800 bg-slate-900/70 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-sm font-medium text-slate-100">Hiệu suất theo topic</p>
+            <p className="text-xs text-slate-500">
+              Dùng dữ liệu analytics hiện có để xem topic nào đang giữ người xem tốt hơn.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <AnalyticsScopeBadge label="Latest snapshot · toàn bộ video đã publish" />
+            <button
+              onClick={() => setTopicSort("retention")}
+              className={`rounded-lg border px-3 py-2 text-xs transition-colors ${
+                topicSort === "retention"
+                  ? "border-rose-700/60 bg-rose-600/10 text-rose-300"
+                  : "border-slate-700 bg-slate-950 text-slate-400 hover:border-slate-600 hover:text-slate-200"
+              }`}
+            >
+              Sort: retention
+            </button>
+            <button
+              onClick={() => setTopicSort("views")}
+              className={`rounded-lg border px-3 py-2 text-xs transition-colors ${
+                topicSort === "views"
+                  ? "border-rose-700/60 bg-rose-600/10 text-rose-300"
+                  : "border-slate-700 bg-slate-950 text-slate-400 hover:border-slate-600 hover:text-slate-200"
+              }`}
+            >
+              Sort: views
+            </button>
+          </div>
+        </div>
+
+        {sortedTopics.length === 0 ? (
+          <div className="px-4 py-10 text-sm text-slate-500">
+            Chưa có dữ liệu topic cho bộ lọc hiện tại.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1040px] text-sm">
+              <thead className="bg-slate-950/60">
+                <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wide text-slate-500">
+                  <th className="px-4 py-3">Topic</th>
+                  <th className="px-4 py-3">Niche</th>
+                  <th className="px-4 py-3">Video</th>
+                  <th className="px-4 py-3">Avg views</th>
+                  <th className="px-4 py-3">Avg duration</th>
+                  <th className="px-4 py-3">Avg retention</th>
+                  <th className="px-4 py-3">Published gần nhất</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedTopics.map((row) => {
+                  const lowConfidence = row.videoCount < 2;
+                  return (
+                    <tr
+                      key={`${row.topic}-${row.niche ?? "none"}`}
+                      className={`border-b border-slate-900/80 align-top ${lowConfidence ? "bg-amber-950/10" : ""}`}
+                    >
+                      <td className="px-4 py-3">
+                        <div className="max-w-[420px] space-y-1">
+                          <p className="line-clamp-2 text-sm font-medium text-slate-100">{row.topic}</p>
+                          {lowConfidence ? (
+                            <span className="inline-flex rounded-md border border-amber-700/50 bg-amber-900/20 px-2 py-1 text-[11px] text-amber-300">
+                              Low confidence
+                            </span>
+                          ) : null}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-sm text-slate-300">{row.niche || "—"}</td>
+                      <td className="px-4 py-3 text-sm text-slate-100">{formatNumber(row.videoCount)}</td>
+                      <td className="px-4 py-3 text-sm text-slate-100">{formatNumber(row.avgViews)}</td>
+                      <td className="px-4 py-3 text-sm text-slate-300">{formatDuration(row.avgViewDurationSec)}</td>
+                      <td className="px-4 py-3 text-sm text-slate-300">
+                        {row.avgRetentionPct == null ? "—" : `${row.avgRetentionPct.toFixed(2)}%`}
+                      </td>
+                      <td className="px-4 py-3 text-sm text-slate-300">{formatDateTime(row.lastPublishedAt)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-8 overflow-hidden rounded-xl border border-slate-800">
+        <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/70 px-4 py-3">
+          <div>
+            <p className="text-sm font-medium text-slate-100">Hook Performance</p>
+            <p className="text-xs text-slate-500">
+              Mỗi dòng là một hook đã dùng trong short/reel. Sắp xếp theo avg retention giảm dần. Low confidence khi videoCount &lt; 2.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <AnalyticsScopeBadge label="Latest snapshot · toàn bộ short/reel đã publish" />
+            <div className="text-xs text-slate-500">{hookPerformance.length} hook</div>
+          </div>
+        </div>
+
+        {hookPerformance.length === 0 ? (
+          <div className="px-4 py-10 text-sm text-slate-500">
+            Chưa có dữ liệu hook cho bộ lọc hiện tại. Hook tracking được lưu từ lần generate tiếp theo.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1120px] text-sm">
+              <thead className="bg-slate-950/60">
+                <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wide text-slate-500">
+                  <th className="px-4 py-3">Hook</th>
+                  <th className="px-4 py-3">Type</th>
+                  <th className="px-4 py-3">Pattern</th>
+                  <th className="px-4 py-3">Topic / Niche</th>
+                  <th className="px-4 py-3">Video</th>
+                  <th className="px-4 py-3">Avg views</th>
+                  <th className="px-4 py-3">Avg duration</th>
+                  <th className="px-4 py-3">Avg retention</th>
+                  <th className="px-4 py-3">Published gần nhất</th>
+                </tr>
+              </thead>
+              <tbody>
+                {hookPerformance.map((row, idx) => (
+                  <tr
+                    key={`${row.hookText}-${idx}`}
+                    className={`border-b border-slate-900/80 align-top ${row.lowConfidence ? "bg-amber-950/10" : ""}`}
+                  >
+                    <td className="px-4 py-3">
+                      <div className="max-w-[400px] space-y-1">
+                        <p className="line-clamp-3 text-sm text-slate-100">{row.hookText}</p>
+                        {row.lowConfidence ? (
+                          <span className="inline-flex rounded-md border border-amber-700/50 bg-amber-900/20 px-2 py-1 text-[11px] text-amber-300">
+                            Low confidence
+                          </span>
+                        ) : null}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      {row.hookType ? (
+                        <span className="inline-flex rounded-md border border-indigo-700/50 bg-indigo-900/20 px-2 py-1 text-xs text-indigo-300">
+                          {row.hookType}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-slate-600">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      {row.hookPattern ? (
+                        <span className="inline-flex rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300">
+                          {row.hookPattern}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-slate-600">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="text-sm text-slate-200">{row.topic || "—"}</div>
+                      <div className="mt-1 text-xs text-slate-500">{row.niche || "—"}</div>
+                    </td>
+                    <td className="px-4 py-3 text-sm text-slate-100">{formatNumber(row.videoCount)}</td>
+                    <td className="px-4 py-3 text-sm text-slate-100">{formatNumber(row.avgViews)}</td>
+                    <td className="px-4 py-3 text-sm text-slate-300">{formatDuration(row.avgViewDurationSec)}</td>
+                    <td className="px-4 py-3 text-sm text-slate-300">
+                      {row.avgRetentionPct == null ? "—" : `${row.avgRetentionPct.toFixed(2)}%`}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-slate-300">{formatDateTime(row.lastPublishedAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Hook Type Aggregation */}
+      <div className="mt-8 rounded-xl border border-slate-800 bg-slate-900/50">
+        <div className="flex items-center justify-between border-b border-slate-800 px-6 py-4">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-100">Hook Type Performance</h3>
+            <p className="mt-0.5 text-xs text-slate-500">Phân loại hook theo dạng nội dung — so sánh avg views và retention</p>
+          </div>
+          <div className="text-xs text-slate-500">{hookTypePerformance.length} loại</div>
+        </div>
+        {hookTypePerformance.length === 0 ? (
+          <div className="px-4 py-10 text-sm text-slate-500">
+            Chưa có dữ liệu hook type. Sẽ có sau khi generate content mới hoặc chạy backfill script.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-950/60">
+                <tr className="border-b border-slate-800 text-left text-[11px] uppercase tracking-wide text-slate-500">
+                  <th className="px-4 py-3">Hook Type</th>
+                  <th className="px-4 py-3">Video</th>
+                  <th className="px-4 py-3">Avg views</th>
+                  <th className="px-4 py-3">Avg duration</th>
+                  <th className="px-4 py-3">Avg retention</th>
+                </tr>
+              </thead>
+              <tbody>
+                {hookTypePerformance.map((row) => (
+                  <tr key={row.hookType} className={`border-b border-slate-900/80 ${row.lowConfidence ? "bg-amber-950/10" : ""}`}>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <span className="inline-flex rounded-md border border-indigo-700/50 bg-indigo-900/20 px-2 py-1 text-xs text-indigo-300">
+                          {row.hookType}
+                        </span>
+                        <span className="text-xs text-slate-400">{row.displayName}</span>
+                      </div>
+                      {row.lowConfidence && (
+                        <div className="mt-1 text-[11px] text-amber-500">Low confidence (&lt;3 video)</div>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-slate-100">{formatNumber(row.videoCount)}</td>
+                    <td className="px-4 py-3 text-sm text-slate-100">{formatNumber(row.avgViews)}</td>
+                    <td className="px-4 py-3 text-sm text-slate-300">{formatDuration(row.avgViewDurationSec)}</td>
+                    <td className="px-4 py-3 text-sm text-slate-300">
+                      {row.avgRetentionPct == null ? "—" : `${row.avgRetentionPct.toFixed(2)}%`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {selectedPlatform !== "youtube" ? (

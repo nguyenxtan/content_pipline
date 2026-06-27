@@ -49,6 +49,55 @@ Quy tắc quan trọng nhất:
 
 Chỉ xuất script, không giải thích thêm.`;
 
+export const DEFAULT_PSYCHOLOGY_SHORT_PROMPT = `Viết một kịch bản video ngắn về chủ đề: {{topic}}
+
+Lĩnh vực: {{niche}}
+
+Mục tiêu:
+
+Người nghe phải thấy đây là một cảm xúc, tình huống, hoặc kiểu im lặng rất thật trong đời sống hiện đại.
+
+Yêu cầu:
+
+- 120-160 từ
+- Giọng hiện đại, ngắn, sắc, bình tĩnh
+- Không giảng đạo
+- Không dạy đời
+- Không self-help
+- Không dùng khung Phật giáo, nhân quả, nghiệp, giác ngộ
+
+Mở đầu:
+
+- Câu đầu tiên đã là hook
+- Không mở đầu bằng định nghĩa, lời khuyên, hay khái niệm trừu tượng
+- Câu đầu phải giống một quan sát thật, một cảm giác khó nói, hoặc một nghịch lý trong quan hệ và trưởng thành
+
+Sau đó:
+
+- Dẫn bằng một cảnh đời thường, một phản ứng rất người, hoặc một kiểu mệt quen thuộc
+- Ưu tiên các chủ đề như: im lặng, bị hiểu lầm, sợ làm phiền, people-pleasing, tự trọng, bị thao túng, cô đơn giữa đám đông, không còn muốn giải thích
+- Dùng hình ảnh hiện đại, đời thường, cụ thể
+- Không dùng "quý vị"
+- Không dùng tone chữa lành sáo rỗng như "mọi thứ đều có lý do", "yêu bản thân", "vết thương nào rồi cũng lành"
+
+Kết thúc:
+
+- Một câu khiến người nghe thấy đau nhẹ hoặc nhìn rõ mình hơn vài giây
+- Không thêm CTA
+
+Quy tắc quan trọng nhất:
+
+- Nội dung phải nghe như một người trưởng thành đang nói thật về điều họ từng đi qua
+- Không được giống AI, không giống lời giảng, không giống caption self-help đại trà
+- Xưng hô: "bạn", "người ta", hoặc không cần xưng hô nếu câu đủ tự nhiên
+
+Định dạng output:
+
+- Chỉ xuất nội dung cuối cùng
+- Không tiêu đề, không markdown, không ghi chú, không emoji
+
+Chỉ xuất script, không giải thích thêm.`;
+
 export const DEFAULT_LONG_PROMPT = `Lĩnh vực: {{niche}}
 Chủ đề gợi ý: {{topic}}
 
