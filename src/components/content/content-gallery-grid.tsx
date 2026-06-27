@@ -21,7 +21,6 @@ interface Props {
   onLongImages: (id: string) => Promise<void>;
   onVideo: (id: string) => Promise<void>;
   onYoutubeUpload: (id: string) => Promise<void>;
-  onExpandToLong: (id: string) => Promise<void>;
   onRegenerateHooks: (id: string) => Promise<void>;
   onLocalUpdate: (id: string, patch: Partial<ContentGenerationRow>) => void;
 }
@@ -60,7 +59,6 @@ export function ContentGalleryGrid({
   onLongImages,
   onVideo,
   onYoutubeUpload,
-  onExpandToLong,
   onRegenerateHooks,
   onLocalUpdate,
 }: Props) {
@@ -70,18 +68,8 @@ export function ContentGalleryGrid({
   const [longImagesLoadingId, setLongImagesLoadingId]   = useState<string | null>(null);
   const [videoLoadingId, setVideoLoadingId]             = useState<string | null>(null);
   const [youtubeLoadingId, setYoutubeLoadingId]         = useState<string | null>(null);
-  const [expandLoadingId, setExpandLoadingId]           = useState<string | null>(null);
   const [hookLoadingId, setHookLoadingId]               = useState<string | null>(null);
   const [scheduleModal, setScheduleModal]               = useState<{ item: ContentGenerationRow; videoType: "short" | "long" | "quote" } | null>(null);
-
-  const handleExpandToLong = async (id: string) => {
-    setExpandLoadingId(id);
-    try {
-      await onExpandToLong(id);
-    } finally {
-      setExpandLoadingId(null);
-    }
-  };
 
   const handleTTS = async (id: string) => {
     setTtsLoadingId(id);
@@ -232,7 +220,6 @@ export function ContentGalleryGrid({
           onLongImages={async () => handleLongImages(item.id)}
           onVideo={async () => handleVideo(item.id)}
           onYoutubeUpload={async () => handleYoutubeUpload(item.id)}
-          onExpandToLong={async () => handleExpandToLong(item.id)}
           onRegenerateHooks={async () => handleRegenerateHooks(item.id)}
           onScheduleShort={() => setScheduleModal({ item, videoType: "short" })}
           onScheduleQuote={() => setScheduleModal({ item, videoType: "quote" })}
@@ -243,7 +230,6 @@ export function ContentGalleryGrid({
           isLongImagesLoading={longImagesLoadingId === item.id}
           isVideoLoading={videoLoadingId === item.id}
           isYoutubeLoading={youtubeLoadingId === item.id}
-          isExpandLoading={expandLoadingId === item.id}
           isHookLoading={hookLoadingId === item.id}
         />
       ))}

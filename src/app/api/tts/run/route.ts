@@ -4,7 +4,7 @@ import { runTTS } from "@/lib/pipeline/tts";
 export async function POST(req: Request) {
   const { contentId, contentType = "short" } = await req.json() as {
     contentId: string;
-    contentType?: "short" | "long";
+    contentType?: "short";
   };
   if (!contentId) return NextResponse.json({ error: "contentId required" }, { status: 400 });
 

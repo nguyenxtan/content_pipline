@@ -13,7 +13,6 @@ import {
   Mic2,
   Music,
   AlignLeft,
-  BookOpen,
   ImageIcon,
   CalendarClock,
   Quote,
@@ -29,11 +28,9 @@ import {
   BotMessageSquare,
   Layers3,
   BrainCircuit,
-  PenLine,
   CircleDollarSign,
   BookMarked,
   LifeBuoy,
-  Headphones,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { logoutAction } from "@/actions/auth";
@@ -44,7 +41,6 @@ const contentSubItems = [
   { href: "/content/quotes",        label: "Quote Shorts",icon: Quote          },
   { href: "/content/workspaces",    label: "Workspaces",   icon: Layers3          },
   { href: "/content/prompts",       label: "Prompt Studio",icon: BotMessageSquare },
-  { href: "/content/gallery/long",  label: "Long",        icon: BookOpen       },
   { href: "/content/scheduler",     label: "Lập lịch",    icon: CalendarClock  },
 ];
 
@@ -56,7 +52,6 @@ const publishingSubItems = [
   { href: "/publishing/errors",    label: "Lỗi / Retry",    icon: AlertOctagon  },
   { href: "/publishing/analytics", label: "Phân tích",      icon: BarChart3     },
   { href: "/publishing/analytics/content-intelligence", label: "Content Intel", icon: BrainCircuit },
-  { href: "/admin/longform-planner", label: "Longform Planner", icon: BookOpen },
   { href: "/publishing/health",    label: "Sức khoẻ",       icon: Activity      },
 ];
 
@@ -72,7 +67,6 @@ const settingsSubItems = [
 const storyLibrarySubItems = [
   { href: "/admin/story-library", label: "Overview", icon: BookMarked },
   { href: "/admin/story-library/missing-chapters", label: "Missing Chapters", icon: LifeBuoy },
-  { href: "/admin/story-library/audio-candidates", label: "Audio Candidates", icon: Headphones },
   { href: "/admin/story-library/crawl-monitor", label: "Crawl Monitor", icon: Activity },
 ];
 
@@ -80,9 +74,7 @@ export function Sidebar() {
   const pathname = usePathname();
   const isContentActive = pathname.startsWith("/content");
   const isSettingsActive = pathname.startsWith("/settings");
-  const isPublishingActive =
-    pathname.startsWith("/publishing") || pathname.startsWith("/admin/longform-planner");
-  const isStoryStudioActive = pathname.startsWith("/story-studio");
+  const isPublishingActive = pathname.startsWith("/publishing");
   const isStoryLibraryActive = pathname.startsWith("/admin/story-library");
 
   return (
@@ -210,20 +202,6 @@ export function Sidebar() {
             </div>
           )}
         </div>
-
-        {/* Story Studio */}
-        <Link
-          href="/story-studio"
-          className={cn(
-            "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
-            isStoryStudioActive
-              ? "bg-rose-600/10 text-rose-400"
-              : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
-          )}
-        >
-          <PenLine className="h-4 w-4" />
-          Story Studio
-        </Link>
 
         <Link
           href="/admin/story-library"

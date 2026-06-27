@@ -11,7 +11,6 @@ import {
   unlockContentGenerationAction,
   updateContentStatusAction,
   deleteContentGenerationAction,
-  expandToLongAction,
   regenerateShortHooksAction,
 } from "@/actions/content-generator";
 import { ContentGalleryToolbar, type GalleryToolbarFilters } from "./content-gallery-toolbar";
@@ -204,15 +203,6 @@ export function ContentGallery({ niches, initialData, initialTab = "short", init
     }
   };
 
-  const handleExpandToLong = async (id: string) => {
-    const result = await expandToLongAction(id);
-    if (result.success) {
-      updateLocal(id, { longContent: result.longContent, contentMode: "both" });
-    } else {
-      alert(`Lỗi tạo long content: ${result.error}`);
-    }
-  };
-
   const handleRegenerateHooks = async (id: string) => {
     const result = await regenerateShortHooksAction(id);
     if (!result.success) {
@@ -307,7 +297,6 @@ export function ContentGallery({ niches, initialData, initialTab = "short", init
         onLongImages={handleLongImages}
         onVideo={(id) => handleVideo(id, activeTab)}
         onYoutubeUpload={handleYoutubeUpload}
-        onExpandToLong={handleExpandToLong}
         onRegenerateHooks={handleRegenerateHooks}
         onLocalUpdate={updateLocal}
       />

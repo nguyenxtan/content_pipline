@@ -82,9 +82,13 @@ export const CHANNEL_DEFINITIONS: Record<ChannelKey, ChannelDefinition> = {
   tang_sau: {
     key: "tang_sau",
     label: "Tang Sau",
-    description: "Kênh Psychology cho Tầng Sâu, chỉ cho phép kết nối và đăng thủ công",
+    // Out of scope (see docs/SCOPE_REDUCTION_AUDIT_2026_06_26.md). Kept as a disabled
+    // channel definition (not removed from the ChannelKey union) so historical tang_sau
+    // content_generations/upload_queue/published_videos rows still type-check and remain
+    // viewable in analytics; publishing is hard-disabled below.
+    description: "Kênh Psychology cho Tầng Sâu — đã ngừng hoạt động, chỉ giữ lại dữ liệu lịch sử",
     status: "draft",
-    publishingEnabled: true,
+    publishingEnabled: false,
     autoScheduleEnabled: false,
     allowLegacyEnvFallback: false,
   },

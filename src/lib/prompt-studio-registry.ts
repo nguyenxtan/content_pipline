@@ -252,24 +252,7 @@ export const CHANNEL_PROFILES: ChannelProfile[] = [
     defaultAudienceProfile: "healing_seekers",
     notes: "Giữ chất chữa lành, mềm, không giật gân quá đà.",
   },
-  {
-    id: "tang_sau_v1",
-    channelName: "Tầng sâu",
-    label: "Tầng sâu v1",
-    niche: "Philosophy, books, psychology, inner life, modern loneliness",
-    tone: ["deep", "concise", "contemplative", "modern"],
-    vocabulary: ["im lặng", "chiều sâu", "tự do nội tâm", "cô đơn", "ý nghĩa", "lựa chọn", "bản ngã"],
-    avoid: ["overusing quý vị", "explicit Buddhist framing", "preachy religious wording"],
-    preferredTopicFamilyIds: [
-      "modern_loneliness",
-      "identity_choice",
-      "inner_freedom",
-      "books_philosophy",
-      "meaning_silence",
-    ],
-    defaultAudienceProfile: "modern_reflective",
-    notes: "Ưu tiên ngôn ngữ đời sống, triết nhẹ, hiện đại, ít màu tôn giáo trực diện.",
-  },
+  // tang_sau_v1 removed — tang_sau is out of scope (see docs/SCOPE_REDUCTION_AUDIT_2026_06_26.md)
 ];
 
 export const CONTENT_FORMAT_PROFILES: ContentFormatProfile[] = [
@@ -316,41 +299,7 @@ export const TOPIC_FAMILIES: TopicFamilyProfile[] = [
       channels: f.channels,
       exampleTopics: f.angles.slice(0, 2),
     })),
-  {
-    id: "modern_loneliness",
-    label: "Cô đơn hiện đại",
-    description: "Cô đơn giữa đám đông, cảm giác lạc lõng, sống nhanh mà rỗng.",
-    channels: ["tang_sau_v1"],
-    exampleTopics: ["Có những người nói rất nhiều nhưng không ai thực sự hiểu họ"],
-  },
-  {
-    id: "identity_choice",
-    label: "Bản ngã · Lựa chọn",
-    description: "Bản ngã, lựa chọn sống, cách ta tự định nghĩa mình.",
-    channels: ["tang_sau_v1"],
-    exampleTopics: ["Điều khó nhất không phải chọn đúng mà là dám chịu trách nhiệm"],
-  },
-  {
-    id: "inner_freedom",
-    label: "Tự do nội tâm",
-    description: "Thoát khỏi ám ảnh phải vừa lòng người khác, tìm tự do bên trong.",
-    channels: ["tang_sau_v1"],
-    exampleTopics: ["Tự do nhất là khi không còn phải đóng vai ai nữa"],
-  },
-  {
-    id: "books_philosophy",
-    label: "Sách · Triết lý",
-    description: "Góc nhìn từ sách, triết học, đời sống tinh thần và những câu hỏi lớn.",
-    channels: ["tang_sau_v1"],
-    exampleTopics: ["Có những cuốn sách không trả lời mà chỉ buộc ta tự nhìn lại mình"],
-  },
-  {
-    id: "meaning_silence",
-    label: "Im lặng · Ý nghĩa",
-    description: "Khoảng lặng, ý nghĩa sống, chiều sâu của việc dừng lại đúng lúc.",
-    channels: ["tang_sau_v1"],
-    exampleTopics: ["Không phải im lặng nào cũng là trống rỗng"],
-  },
+  // Tang Sau families removed — tang_sau is out of scope (see docs/SCOPE_REDUCTION_AUDIT_2026_06_26.md)
 ];
 
 export const PROMPT_VARIANTS: PromptVariant[] = [
@@ -363,25 +312,18 @@ export const PROMPT_VARIANTS: PromptVariant[] = [
     channelProfileIds: ["buddhist_healing_v1"],
   },
   {
-    id: "quote_reflective_modern",
-    label: "Quote reflective modern",
-    description: "Ngắn, lạnh hơn một chút, hiện đại, ít màu tôn giáo trực diện.",
-    templateId: "quote_short_generation",
-    channelProfileIds: ["tang_sau_v1"],
-  },
-  {
     id: "hook_soft_curiosity",
     label: "Soft curiosity",
     description: "Hook kiểu khơi mở, không giật mạnh nhưng vẫn khiến người xem dừng lại.",
     templateId: "tts_short_hook_engine",
-    channelProfileIds: ["buddhist_healing_v1", "tang_sau_v1"],
+    channelProfileIds: ["buddhist_healing_v1"],
   },
   {
     id: "script_reflective_story",
     label: "Reflective story",
     description: "Script ưu tiên chiêm nghiệm đời thường và dẫn vào ý sâu.",
     templateId: "tts_short_script_engine",
-    channelProfileIds: ["buddhist_healing_v1", "tang_sau_v1"],
+    channelProfileIds: ["buddhist_healing_v1"],
   },
 ];
 
@@ -395,7 +337,7 @@ export const PROMPT_TEMPLATES: PromptTemplate[] = [
     platformIds: ["youtube_shorts", "facebook_reels"],
     fixedFieldIds: ["output_length", "quote_no_hashtags", "validation_constraints"],
     editableFieldIds: ["quote_style", "visual_mood", "music_mood", "audience", "experiment_variant"],
-    variantIds: ["quote_meditative_buddhist", "quote_reflective_modern"],
+    variantIds: ["quote_meditative_buddhist"],
   },
   {
     id: "tts_short_hook_engine",
@@ -451,8 +393,6 @@ export const PROMPT_OPTION_GROUPS: PromptOptionGroup[] = [
     options: [
       { id: "meditative", label: "Meditative", description: "Ấm, mềm, ít sắc cạnh.", channelProfileIds: ["buddhist_healing_v1"] },
       { id: "healing", label: "Healing", description: "Dịu, xoa dịu tổn thương.", channelProfileIds: ["buddhist_healing_v1"] },
-      { id: "reflective_modern", label: "Reflective modern", description: "Ngắn, hiện đại, có chiều sâu.", channelProfileIds: ["tang_sau_v1"] },
-      { id: "philosophical", label: "Philosophical", description: "Nghiêng về suy tư, bản ngã, lựa chọn.", channelProfileIds: ["tang_sau_v1"] },
     ],
   },
   {
@@ -467,9 +407,7 @@ export const PROMPT_OPTION_GROUPS: PromptOptionGroup[] = [
       { id: "golden_compassion", label: "Golden compassion", description: "Ánh vàng từ bi, hoa sen rực rỡ, hy vọng.", channelProfileIds: ["buddhist_healing_v1"] },
       { id: "healing_light", label: "Healing light", description: "Ánh sáng chữa lành, trắng ngà, xanh dịu.", channelProfileIds: ["buddhist_healing_v1"] },
       { id: "dawn_pagoda", label: "Dawn pagoda", description: "Chùa bình minh, bầu trời sáng, thiên nhiên tươi.", channelProfileIds: ["buddhist_healing_v1"] },
-      { id: "gentle_nature", label: "Gentle nature", description: "Thiên nhiên dịu, ít drama.", channelProfileIds: ["buddhist_healing_v1", "tang_sau_v1"] },
-      { id: "blue_solitude", label: "Blue solitude", description: "Xanh lạnh, cô tịch, hiện đại.", channelProfileIds: ["tang_sau_v1"] },
-      { id: "editorial_stillness", label: "Editorial stillness", description: "Sạch, premium, ít biểu tượng tôn giáo.", channelProfileIds: ["tang_sau_v1"] },
+      { id: "gentle_nature", label: "Gentle nature", description: "Thiên nhiên dịu, ít drama.", channelProfileIds: ["buddhist_healing_v1"] },
     ],
   },
   {
@@ -478,9 +416,7 @@ export const PROMPT_OPTION_GROUPS: PromptOptionGroup[] = [
     description: "Mood nhạc nền cho Quote Shorts.",
     options: [
       { id: "soft_meditation", label: "Soft meditation", description: "Mềm, ngân, thở chậm.", channelProfileIds: ["buddhist_healing_v1"] },
-      { id: "warm_piano", label: "Warm piano", description: "Ấm, dễ nghe, cảm xúc dịu.", channelProfileIds: ["buddhist_healing_v1", "tang_sau_v1"] },
-      { id: "ambient_reflection", label: "Ambient reflection", description: "Nhẹ, hiện đại, khoảng trống tốt.", channelProfileIds: ["tang_sau_v1"] },
-      { id: "low_cinematic", label: "Low cinematic", description: "Trầm, có chiều sâu nhưng không căng.", channelProfileIds: ["tang_sau_v1"] },
+      { id: "warm_piano", label: "Warm piano", description: "Ấm, dễ nghe, cảm xúc dịu.", channelProfileIds: ["buddhist_healing_v1"] },
     ],
   },
   {
@@ -490,8 +426,6 @@ export const PROMPT_OPTION_GROUPS: PromptOptionGroup[] = [
     options: [
       { id: "healing_seekers", label: "Healing seekers", description: "Người đang cần chữa lành, bình an.", channelProfileIds: ["buddhist_healing_v1"] },
       { id: "mindfulness_beginners", label: "Mindfulness beginners", description: "Người mới tiếp cận chánh niệm, buông bỏ.", channelProfileIds: ["buddhist_healing_v1"] },
-      { id: "modern_reflective", label: "Modern reflective", description: "Người trẻ suy tư, quan tâm nội tâm và đời sống hiện đại.", channelProfileIds: ["tang_sau_v1"] },
-      { id: "book_philosophy_readers", label: "Book/philosophy readers", description: "Người thích sách, triết, tâm lý.", channelProfileIds: ["tang_sau_v1"] },
     ],
   },
   {
@@ -502,7 +436,6 @@ export const PROMPT_OPTION_GROUPS: PromptOptionGroup[] = [
       { id: "buddhist_teaching", label: "Buddhist teaching", description: "Lời dạy Phật giáo trực tiếp.", channelProfileIds: ["buddhist_healing_v1"] },
       { id: "life_reflection", label: "Life reflection", description: "Chiêm nghiệm đời sống qua lăng kính Phật pháp.", channelProfileIds: ["buddhist_healing_v1"] },
       { id: "healing_quote", label: "Healing quote", description: "Câu chữa lành, tươi sáng, ấm áp.", channelProfileIds: ["buddhist_healing_v1"] },
-      { id: "philosophy_reflection", label: "Philosophy reflection", description: "Suy tư triết học đời sống hiện đại.", channelProfileIds: ["tang_sau_v1"] },
     ],
   },
   {
@@ -524,7 +457,6 @@ export const PROMPT_OPTION_GROUPS: PromptOptionGroup[] = [
       { id: "healing_warm", label: "Chữa lành · Ấm áp", description: "Dịu, xoa dịu, tươi sáng.", channelProfileIds: ["buddhist_healing_v1"] },
       { id: "peaceful_hopeful", label: "Bình an · Hy vọng", description: "Nhẹ nhàng, nhìn về phía trước.", channelProfileIds: ["buddhist_healing_v1"] },
       { id: "compassionate_wise", label: "Từ bi · Trí tuệ", description: "Sâu sắc nhưng không nặng nề.", channelProfileIds: ["buddhist_healing_v1"] },
-      { id: "quiet_reflective", label: "Im lặng · Chiêm nghiệm", description: "Trầm tư, đi vào chiều sâu nội tâm.", channelProfileIds: ["tang_sau_v1"] },
     ],
   },
   {
@@ -535,7 +467,6 @@ export const PROMPT_OPTION_GROUPS: PromptOptionGroup[] = [
       { id: "seeking_peace", label: "Tìm bình an", description: "Người đang căng thẳng, muốn dịu lại.", channelProfileIds: ["buddhist_healing_v1"] },
       { id: "seeking_healing", label: "Tìm chữa lành", description: "Người đang tổn thương, cần được an ủi.", channelProfileIds: ["buddhist_healing_v1"] },
       { id: "seeking_wisdom", label: "Tìm trí tuệ", description: "Người muốn học và áp dụng Phật pháp.", channelProfileIds: ["buddhist_healing_v1"] },
-      { id: "seeking_meaning", label: "Tìm ý nghĩa", description: "Người đang tìm chiều sâu và ý nghĩa cuộc sống.", channelProfileIds: ["tang_sau_v1"] },
     ],
   },
   {
@@ -546,7 +477,7 @@ export const PROMPT_OPTION_GROUPS: PromptOptionGroup[] = [
       { id: "wisdom_reveal", label: "Wisdom reveal", description: "Mở đầu bằng câu gây tò mò, hé lộ dần.", channelProfileIds: ["buddhist_healing_v1"] },
       { id: "relatable_pain", label: "Relatable pain", description: "Chạm vào nỗi đau quen thuộc rồi dẫn đến giải pháp.", channelProfileIds: ["buddhist_healing_v1"] },
       { id: "numbered_steps", label: "Numbered steps", description: "Lời dạy đánh số tạo cảm giác hoàn chỉnh.", channelProfileIds: ["buddhist_healing_v1"] },
-      { id: "contrast_insight", label: "Contrast insight", description: "Tương phản bất ngờ để giữ chú ý.", channelProfileIds: ["buddhist_healing_v1", "tang_sau_v1"] },
+      { id: "contrast_insight", label: "Contrast insight", description: "Tương phản bất ngờ để giữ chú ý.", channelProfileIds: ["buddhist_healing_v1"] },
     ],
   },
   {
@@ -557,7 +488,7 @@ export const PROMPT_OPTION_GROUPS: PromptOptionGroup[] = [
       { id: "buddha_statue", label: "Buddha statue", description: "Tượng Phật vàng, ánh hào quang.", channelProfileIds: ["buddhist_healing_v1"] },
       { id: "lotus_water", label: "Lotus water", description: "Hoa sen trên mặt nước yên tĩnh.", channelProfileIds: ["buddhist_healing_v1"] },
       { id: "temple_sunrise", label: "Temple sunrise", description: "Chùa bình minh, ánh sáng ấm áp.", channelProfileIds: ["buddhist_healing_v1"] },
-      { id: "nature_peaceful", label: "Nature peaceful", description: "Thiên nhiên bình yên, không gian thoáng.", channelProfileIds: ["buddhist_healing_v1", "tang_sau_v1"] },
+      { id: "nature_peaceful", label: "Nature peaceful", description: "Thiên nhiên bình yên, không gian thoáng.", channelProfileIds: ["buddhist_healing_v1"] },
     ],
   },
   {
@@ -568,7 +499,6 @@ export const PROMPT_OPTION_GROUPS: PromptOptionGroup[] = [
       { id: "buddha_golden_halo", label: "Buddha & golden halo", description: "Phật và hào quang vàng.", channelProfileIds: ["buddhist_healing_v1"] },
       { id: "lotus_bloom", label: "Lotus bloom", description: "Hoa sen nở, biểu tượng tinh khiết.", channelProfileIds: ["buddhist_healing_v1"] },
       { id: "warm_light_rays", label: "Warm light rays", description: "Tia sáng vàng ấm, chữa lành.", channelProfileIds: ["buddhist_healing_v1"] },
-      { id: "minimal_urban", label: "Minimal urban", description: "Không gian đô thị tối giản, hiện đại.", channelProfileIds: ["tang_sau_v1"] },
     ],
   },
   {
@@ -646,69 +576,6 @@ export const AUDIENCE_PROFILES: AudienceProfileConfig[] = [
       "lời dạy Phật đánh số — series tạo thói quen xem",
       "Phật pháp giữa đời thường — liên kết giáo lý với tình huống cụ thể",
       "câu hỏi dẫn dắt người xem tự khám phá",
-    ],
-  },
-  {
-    id: "modern_reflective",
-    label: "Modern Reflective — Tầng Sâu",
-    channelProfileId: "tang_sau_v1",
-    audienceDescription:
-      "Người trẻ Việt (20–35) sống nhanh, suy nghĩ nhiều, đang tìm kiếm chiều sâu nội tâm. Đọc sách, quan tâm tâm lý, mệt mỏi với áp lực xã hội và cảm giác phải chứng minh bản thân.",
-    ageRange: "20–35",
-    audiencePainPoints: [
-      "cô đơn giữa đám đông — nhiều người quen nhưng ít ai thực sự hiểu",
-      "mệt mỏi với việc phải liên tục chứng minh bản thân",
-      "kiệt sức cảm xúc — cho đi nhiều hơn nhận lại",
-      "lựa chọn khó khăn mà không ai có thể thay quyết định",
-      "sống nhanh nhưng cảm thấy thiếu chiều sâu và ý nghĩa",
-      "nỗi sợ bị hiểu lầm hoặc không được công nhận",
-    ],
-    audienceDesires: [
-      "được hiểu — cảm giác ai đó nói đúng điều mình đang nghĩ",
-      "tự do nội tâm — không còn sống để làm hài lòng người khác",
-      "sức mạnh yên lặng — không cần giải thích hay phòng thủ",
-      "cuộc sống có chiều sâu và ý nghĩa thật sự",
-      "dũng cảm lựa chọn và chịu trách nhiệm cho bản thân",
-      "kết nối thật — không phải mạng xã hội hay vẻ ngoài",
-    ],
-    tonePreference: [
-      "súc tích và chính xác — mỗi chữ có lý do",
-      "hiện đại — như người bạn cùng thế hệ nói thật",
-      "hơi đau nhẹ — chạm vào điều người ta né tránh",
-      "không giảng đạo — quan sát thay vì phán xét",
-      "im lặng có chiều sâu — không phải trống rỗng",
-    ],
-    visualPreference: [
-      "phong cách Kinfolk — ánh sáng tự nhiên, màu trung tính",
-      "không gian đô thị tối giản — bàn làm việc, cửa sổ, cà phê",
-      "hình ảnh cô tịch mà không cô đơn tuyệt vọng",
-      "đêm thành phố nhẹ — ánh đèn ấm từ xa",
-      "đồ vật đơn giản — sách, ly cà phê, ánh sáng buổi sáng",
-    ],
-    avoidedTone: [
-      "Phật giáo trực diện hoặc tâm linh rõ ràng",
-      "truyền cảm hứng kiểu motivational speaker",
-      "ép buộc tích cực hoặc kêu gọi hành động lớn lao",
-      "dùng 'quý vị' — quá trang trọng và xa cách",
-      "preachy hoặc có vẻ dạy đời",
-    ],
-    avoidedVisuals: [
-      "tượng Phật, chùa, nhang, đài sen Phật giáo",
-      "màu sắc quá bão hòa hoặc phong cách fantasy",
-      "người đông đúc hoặc cảnh sống náo nhiệt",
-      "ảnh stock lạc hậu hoặc quá chỉnh sửa",
-    ],
-    bestKnownAngles: [
-      "khoảnh khắc im lặng khiến người xem nhận ra điều gì đó về mình",
-      "sự thật nhỏ về cô đơn, lựa chọn, hay mệt mỏi mà ít ai dám nói",
-      "nghịch lý đời sống — điều ta tưởng đúng nhưng thực ra ngược lại",
-      "câu hỏi không có câu trả lời đơn giản — buộc người xem tự nghĩ",
-      "bản ngã và tự do — chủ đề hay dành cho người trẻ đang tìm mình",
-    ],
-    experimentalAngles: [
-      "bilingual minimal — tiếng Anh + tiếng Việt, cảm giác global nhưng gần gũi",
-      "kinetic text — chữ chuyển động tạo nhịp điệu và cảm xúc",
-      "note/letter format — cảm giác viết riêng cho từng người xem",
     ],
   },
 ];

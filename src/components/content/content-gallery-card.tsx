@@ -5,7 +5,7 @@ import {
   Lock, LockOpen, Eye, Settings2, Trash2,
   Mic, MonitorPlay, Video, Image as ImageIcon, Share2, Film,
   Play, Pause, Loader2, AlertCircle,
-  MoreHorizontal, TvMinimalPlay as Youtube, ExternalLink, TrendingUp, CalendarPlus, RefreshCcw,
+  MoreHorizontal, TvMinimalPlay as Youtube, ExternalLink, CalendarPlus, RefreshCcw,
 } from "lucide-react";
 import type { ContentGenerationRow } from "@/lib/validations/content-generator";
 import type { ContentTab } from "./content-gallery";
@@ -538,7 +538,6 @@ interface Props {
   onLongImages: () => Promise<void>;
   onVideo: () => Promise<void>;
   onYoutubeUpload: () => Promise<void>;
-  onExpandToLong: () => Promise<void>;
   onScheduleShort?: () => void;
   onScheduleQuote?: () => void;
   onScheduleLong?: () => void;
@@ -548,7 +547,6 @@ interface Props {
   isVideoLoading?: boolean;
   isYoutubeLoading?: boolean;
   isLockLoading?: boolean;
-  isExpandLoading?: boolean;
   isHookLoading?: boolean;
 }
 
@@ -556,9 +554,9 @@ export function ContentGalleryCard({
   generation: g,
   activeTab,
   onView, onEditStatus, onLock, onUnlock, onDelete, onRegenerateHooks,
-  onTTS, onImages, onLongImages, onVideo, onYoutubeUpload, onExpandToLong,
+  onTTS, onImages, onLongImages, onVideo, onYoutubeUpload,
   onScheduleShort, onScheduleQuote, onScheduleLong,
-  isTTSLoading, isImagesLoading, isLongImagesLoading, isVideoLoading, isYoutubeLoading, isLockLoading, isExpandLoading, isHookLoading,
+  isTTSLoading, isImagesLoading, isLongImagesLoading, isVideoLoading, isYoutubeLoading, isLockLoading, isHookLoading,
 }: Props) {
   const steps = getSteps(g, activeTab);
   const ready = getReadyStatus(g, activeTab);
@@ -733,19 +731,7 @@ export function ContentGalleryCard({
             </a>
           )}
 
-          {/* Expand to long — shown when short-only and no long content yet */}
-          {activeTab === "short" && g.contentMode === "short" && !g.longContent && (
-            <button
-              onClick={onExpandToLong}
-              disabled={isExpandLoading}
-              className="mt-1.5 inline-flex items-center gap-1.5 rounded-md border border-emerald-800/50 bg-emerald-900/20 px-2 py-1 text-[11px] text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isExpandLoading
-                ? <Loader2 className="h-3 w-3 animate-spin" />
-                : <TrendingUp className="h-3 w-3" />}
-              {isExpandLoading ? "Đang tạo..." : "Tạo video dài"}
-            </button>
-          )}
+          {/* Expand to long removed — longform pipeline out of scope (see docs/SCOPE_REDUCTION_AUDIT_2026_06_26.md) */}
 
           {/* YouTube link when uploaded */}
           {ytIsDone && ytVideoUrl && (

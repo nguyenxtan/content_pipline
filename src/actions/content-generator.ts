@@ -13,9 +13,7 @@ import { DEFAULT_PSYCHOLOGY_SHORT_PROMPT, DEFAULT_SHORT_PROMPT, DEFAULT_LONG_PRO
 import { checkCapacityGate, notifyBackpressureIfNeeded } from "@/lib/production-capacity";
 import { runTTS } from "@/lib/pipeline/tts";
 import { runImages } from "@/lib/pipeline/images";
-import { runLongImages } from "@/lib/pipeline/long-images";
 import { runShortVideo } from "@/lib/pipeline/short-video";
-import { runLongVideo } from "@/lib/pipeline/long-video";
 import { runHookEngine, inferHookPattern, inferHookType, type ScoredHook } from "@/lib/hook-engine";
 import {
   runScriptEngine,
@@ -29,8 +27,6 @@ import { pickBuddhistSprintTopicFamily, sprintAllocationSummary, PHAT_PHAP_SPRIN
 import { generateQuoteShortsAction } from "@/actions/quote-generator";
 import { pickVoiceForContent } from "@/lib/voice-rotation";
 import {
-  getRecommendedLongBatchSize,
-  getRecommendedLongConcurrency,
   getRecommendedShortBatchSize,
   getRecommendedShortConcurrency,
   mapWithConcurrency,
@@ -513,6 +509,11 @@ export async function generateContentAction(
   let longModel  = MODEL;
   const needShort = contentMode === "short" || contentMode === "both";
   const needLong  = contentMode === "long"  || contentMode === "both";
+  // Longform generation is out of scope (see docs/SCOPE_REDUCTION_AUDIT_2026_06_26.md).
+  // Fail closed instead of silently downgrading so callers notice immediately.
+  if (needLong) {
+    return { error: "Long-form generation đã bị loại bỏ khỏi scope (xem SCOPE_REDUCTION_AUDIT)." };
+  }
   let shortPromptTemplateId: number | null = null;
   let shortPromptTemplateVersion: number | null = null;
   let longPromptTemplateId: number | null = null;
@@ -574,49 +575,6 @@ export async function generateContentAction(
       shortPickTokens.out = shortDraft.usage.pickOut;
       shortTokens.in = shortDraft.usage.shortIn;
       shortTokens.out = shortDraft.usage.shortOut;
-    }
-
-    if (needLong) {
-      if (!shortSelectedHook) {
-        const hookEngine = await runHookEngine({
-            client,
-            model: shortModel,
-            topic: parsed.data.topic,
-            nicheName: niche.name,
-            nicheDescription: niche.description,
-            tone: niche.tone,
-            contentProfileKey,
-            dedupBlock,
-            count: 20,
-        });
-        shortHookCandidates = hookEngine.hooks;
-        shortSelectedHook = hookEngine.selectedHook;
-        hookScoredCandidates = hookEngine.scoredHooks;
-        hookScore = hookEngine.scoredHooks.find(h => h.hook === hookEngine.selectedHook)?.scores.total ?? null;
-        hookPattern = inferHookPattern(hookEngine.selectedHook);
-        hookType = inferHookType(hookEngine.selectedHook);
-        hookGeneratedAt = new Date();
-        shortHookTokens.in += hookEngine.usage.generateIn;
-        shortHookTokens.out += hookEngine.usage.generateOut;
-        shortPickTokens.in += hookEngine.usage.scoreIn;
-        shortPickTokens.out += hookEngine.usage.scoreOut;
-      }
-
-      const longBase = applyTemplate(longTpl?.content ?? DEFAULT_LONG_PROMPT, vars) + dedupBlock;
-      const longScript = await runScriptEngine({
-        client,
-        model: longModel,
-        topic: parsed.data.topic,
-        nicheName: niche.name,
-        selectedHook: shortSelectedHook,
-        contentProfileKey,
-        mode: "long",
-        longBasePrompt: longBase,
-      });
-      if (longScript.mode !== "long") throw new Error("Long script engine returned invalid mode");
-      longContent = longScript.result.script;
-      longTokens.in = longScript.usage.inputTokens;
-      longTokens.out = longScript.usage.outputTokens;
     }
 
     totalInputTokens  += shortHookTokens.in + shortPickTokens.in + shortTokens.in  + longTokens.in;
@@ -694,14 +652,12 @@ export async function generateContentAction(
   // Voice Rotation V1: pick voice deterministically before INSERT so it goes in atomically.
   // Only applies to tts_short (voice is irrelevant for legacy_quote_short / long_video).
   // newId was declared earlier so script/hook usage logs can reference it before INSERT.
-  const rotatedVoice = contentMode !== "long"
-    ? pickVoiceForContent(newId, channelKey)
-    : null;
+  const rotatedVoice = pickVoiceForContent(newId, channelKey);
 
   console.log(
     `[generate] topic="${parsed.data.topic}" family="${resolvedTopicFamily}"` +
     ` (${STRATEGIC_FAMILY_DISPLAY[resolvedTopicFamily as keyof typeof STRATEGIC_FAMILY_DISPLAY] ?? resolvedTopicFamily})` +
-    ` format="${contentMode === "long" ? "long_video" : "tts_short"}" channel="${channelKey}"` +
+    ` format="tts_short" channel="${channelKey}"` +
     (rotatedVoice ? ` voice=${rotatedVoice}` : ""),
   );
 
@@ -741,7 +697,7 @@ export async function generateContentAction(
       generationTime,
       status: "completed",
       contentMode,
-      formatType: contentMode === "long" ? "long_video" : "tts_short",
+      formatType: "tts_short",
       topicFamily: resolvedTopicFamily,
       ttsVoice: rotatedVoice,
     })
@@ -1562,87 +1518,9 @@ export async function runSchedulerJobAction(
     };
   }
 
-  // ── Long pipeline job ───────────────────────────────────────
+  // long_pipeline removed — longform pipeline is out of scope (see docs/SCOPE_REDUCTION_AUDIT_2026_06_26.md)
   if (jobType === "long_pipeline") {
-    const gate = await checkCapacityGate("long_pipeline");
-    if (!gate.allowed) {
-      await deferSchedulerJobForBackpressure(jobId, job.nextRunAt ?? null);
-      await notifyBackpressureIfNeeded("long_pipeline", gate.violations).catch(() => {});
-      console.warn(
-        `[backpressure] long_pipeline blocked for job ${jobId}:`,
-        gate.violations.map((v) => v.message).join("; "),
-      );
-      return { skipped: true, reason: "backpressure", violations: gate.violations.map((v) => v.message) };
-    }
-
-    const batchSize   = Math.max(job.batchSize ?? 2, getRecommendedLongBatchSize());
-    const contentMode = job.contentMode ?? "both";
-    const modeFilter  = contentMode === "long" ? ["long"] : contentMode === "short" ? [] : ["long", "both"];
-    if (modeFilter.length === 0) return { error: "Long pipeline không xử lý content_mode=short" };
-
-    // Pick items where long video is not done — including error items for retry
-    const pending = await db.select({
-      id: contentGenerations.id,
-      longTtsStatus: contentGenerations.longTtsStatus,
-    })
-      .from(contentGenerations)
-      .where(and(
-        eq(contentGenerations.nicheId, job.nicheId),
-        inArray(contentGenerations.longVideoStatus, ["pending", "error"]),
-        inArray(contentGenerations.contentMode, modeFilter),
-      ))
-      .orderBy(asc(contentGenerations.createdAt))
-      .limit(batchSize);
-
-    const ttsVoiceLong = job.ttsVoice ?? null;
-    const longConcurrency = Math.min(batchSize, getRecommendedLongConcurrency());
-
-    const results = await mapWithConcurrency(pending, longConcurrency, async (item) => {
-      const { id, longTtsStatus } = item;
-      const freshItem = await db.query.contentGenerations.findFirst({ where: eq(contentGenerations.id, id) });
-      const needLongImages = freshItem?.longImagesStatus !== "done";
-
-      const [tts, imgs] = await Promise.all([
-        longTtsStatus !== "done"
-          ? runTTS(id, "long", ttsVoiceLong)
-          : Promise.resolve({ success: true as const, audioPath: "", ttsDurationMs: 0 }),
-        needLongImages
-          ? runLongImages(id, {
-              numImages: job.longImageCount ?? undefined,
-              imageStyle: job.longImageStyle ?? undefined,
-              falModel: job.longFalModel ?? undefined,
-              thumbnailFalModel: job.longThumbnailFalModel ?? undefined,
-              thumbnailLlmModel: job.longThumbnailLlmModel ?? undefined,
-              thumbnailImageStyle: job.longThumbnailImageStyle ?? undefined,
-            })
-          : Promise.resolve({
-              success: true as const,
-              imagePaths: [] as string[],
-              thumbnailPath: "",
-              seoDescription: "",
-              durationMs: 0,
-              costUsd: 0,
-            }),
-      ]);
-
-      if (!tts.success) return { id, step: "tts", ok: false, error: tts.error };
-      if (!imgs.success) return { id, step: "images", ok: false, error: imgs.error };
-
-      const vid = await runLongVideo(id);
-      if (!vid.success) return { id, step: "video", ok: false, error: vid.error };
-      await autoScheduleVideoAction(id, "long").catch(() => {});
-      return { id, step: "video", ok: true as const };
-    });
-
-    const nextRunAt = calculateNextRunAt(job.frequency);
-    await db.update(contentSchedulerJobs)
-      .set({ lastRunAt: new Date(), nextRunAt, updatedAt: new Date() })
-      .where(eq(contentSchedulerJobs.id, jobId));
-
-    // Upload queue is cron-driven on purpose so manual/debug job runs cannot
-    // accidentally publish before the scheduled slot.
-
-    return { processed: pending.length, results };
+    return { error: "long_pipeline đã bị loại bỏ khỏi scope (xem SCOPE_REDUCTION_AUDIT)" };
   }
 
   return { error: "jobType không hợp lệ" };

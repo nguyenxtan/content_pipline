@@ -8,10 +8,10 @@ import { logApiUsage } from "@/actions/ai-usage";
 import { runHookEngine } from "@/lib/hook-engine";
 import {
   runScriptEngine,
-  type LongScriptEngineResult,
   type ShortScriptEngineResult,
 } from "@/lib/script-engine";
-import { DEFAULT_LONG_PROMPT, DEFAULT_SHORT_PROMPT } from "@/lib/content-prompts";
+import { DEFAULT_PSYCHOLOGY_SHORT_PROMPT, DEFAULT_SHORT_PROMPT } from "@/lib/content-prompts";
+import { getContentProfile } from "@/lib/config/content-profiles";
 
 const DEFAULT_MODEL =
   process.env.CONTENT_GEN_MODEL ??
@@ -21,7 +21,6 @@ const DEFAULT_MODEL =
 export async function runScriptEngineAction(input: {
   topic: string;
   nicheId?: number | null;
-  mode: "short" | "long";
   model?: string | null;
   dedupTopics?: string[] | null;
 }): Promise<
@@ -34,17 +33,6 @@ export async function runScriptEngineAction(input: {
       validation: ShortScriptEngineResult["validation"];
       rewriteCount: number;
     }
-  | {
-      success: true;
-      mode: "long";
-      hookCandidates: string[];
-      selectedHook: string;
-      script: string;
-      outline: LongScriptEngineResult["outline"];
-      chapters: LongScriptEngineResult["chapters"];
-      validation: LongScriptEngineResult["validation"];
-      rewriteCount: number;
-    }
   | { success: false; error: string }
 > {
   const topic = input.topic?.trim();
@@ -53,20 +41,16 @@ export async function runScriptEngineAction(input: {
   const niche = input.nicheId
     ? await db.query.niches.findFirst({ where: eq(niches.id, input.nicheId) })
     : null;
-  const [shortTpl, longTpl] = input.nicheId
-    ? await Promise.all([
-        db.query.promptTemplates.findFirst({
-          where: (t, { and, eq }) => and(eq(t.nicheId, input.nicheId!), eq(t.stage, "short_gen"), eq(t.isActive, true)),
-        }),
-        db.query.promptTemplates.findFirst({
-          where: (t, { and, eq }) => and(eq(t.nicheId, input.nicheId!), eq(t.stage, "long_gen"), eq(t.isActive, true)),
-        }),
-      ])
-    : [null, null];
+  const shortTpl = input.nicheId
+    ? await db.query.promptTemplates.findFirst({
+        where: (t, { and, eq }) => and(eq(t.nicheId, input.nicheId!), eq(t.stage, "short_gen"), eq(t.isActive, true)),
+      })
+    : null;
+  const profile = getContentProfile(niche?.contentProfileKey);
 
-  const nicheName = niche?.name ?? "Phật Pháp";
-  const nicheDescription = niche?.description ?? "Nội dung Phật pháp và chữa lành";
-  const tone = niche?.tone ?? "Trầm tĩnh, từng trải, gần gũi";
+  const nicheName = niche?.name ?? profile.defaultNicheName;
+  const nicheDescription = niche?.description ?? profile.defaultNicheDescription;
+  const tone = niche?.tone ?? profile.defaultTone;
   const client = getOpenRouterClient();
   const model = input.model ?? DEFAULT_MODEL;
   const dedupBlock = input.dedupTopics?.length
@@ -81,6 +65,7 @@ export async function runScriptEngineAction(input: {
       nicheName,
       nicheDescription,
       tone,
+      contentProfileKey: niche?.contentProfileKey ?? profile.key,
       dedupBlock,
       count: 20,
     });
@@ -91,9 +76,9 @@ export async function runScriptEngineAction(input: {
       topic,
       nicheName,
       selectedHook: hookResult.selectedHook,
-      mode: input.mode,
-      shortBasePrompt: shortTpl?.content ?? DEFAULT_SHORT_PROMPT,
-      longBasePrompt: longTpl?.content ?? DEFAULT_LONG_PROMPT,
+      contentProfileKey: niche?.contentProfileKey ?? profile.key,
+      mode: "short",
+      shortBasePrompt: shortTpl?.content ?? (profile.key === "psychology" ? DEFAULT_PSYCHOLOGY_SHORT_PROMPT : DEFAULT_SHORT_PROMPT),
     });
 
     await Promise.all([
@@ -113,33 +98,19 @@ export async function runScriptEngineAction(input: {
       }),
       logApiUsage({
         model,
-        purpose: input.mode === "short" ? "script_engine_short" : "script_engine_long",
+        purpose: "script_engine_short",
         inputTokens: scriptResult.usage.inputTokens,
         outputTokens: scriptResult.usage.outputTokens,
         nicheId: input.nicheId ?? undefined,
       }),
     ]);
 
-    if (scriptResult.mode === "short") {
-      return {
-        success: true,
-        mode: "short",
-        hookCandidates: hookResult.hooks,
-        selectedHook: hookResult.selectedHook,
-        script: scriptResult.result.script,
-        validation: scriptResult.result.validation,
-        rewriteCount: scriptResult.result.rewriteCount,
-      };
-    }
-
     return {
       success: true,
-      mode: "long",
+      mode: "short",
       hookCandidates: hookResult.hooks,
       selectedHook: hookResult.selectedHook,
       script: scriptResult.result.script,
-      outline: scriptResult.result.outline,
-      chapters: scriptResult.result.chapters,
       validation: scriptResult.result.validation,
       rewriteCount: scriptResult.result.rewriteCount,
     };

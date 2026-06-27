@@ -13,7 +13,6 @@ import {
 } from "@/lib/aimax-settings";
 import { getContentProfile } from "@/lib/config/content-profiles";
 import { getAiMaxVoiceMetadata } from "@/lib/aimax-voice-metadata";
-import { runLongformNarration } from "@/lib/pipeline/longform-narration";
 import { toContainerAudioPath } from "@/lib/pipeline/tts-paths";
 import { createPromptVersionEntry, mergePromptVersions } from "@/lib/prompt-version-registry";
 import { getFallbackVoice } from "@/lib/voice-rotation";
@@ -487,14 +486,10 @@ async function injectPunctuationPauses(
 
 export async function runTTS(
   contentId: string,
-  contentType: "short" | "long",
+  contentType: "short",
   voiceOverride?: string | null,
   options?: { skipCache?: boolean },
 ): Promise<TTSResult> {
-  if (contentType === "long") {
-    return runLongformNarration(contentId, voiceOverride, options);
-  }
-
   const item = await db.query.contentGenerations.findFirst({
     where: eq(contentGenerations.id, contentId),
   });

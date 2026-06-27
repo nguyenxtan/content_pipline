@@ -10,7 +10,6 @@ import {
   type StoryLibraryAudioTextScanSummary,
 } from "@/actions/story-library";
 import type { StorySource, StorySourceChapter } from "@/lib/db/schema";
-import { AUDIO_CANDIDATE_STATUS_LABELS, type AudioReadinessResult } from "@/lib/story-library/audio-readiness";
 
 const RESUME_ELIGIBLE_STORY_STATUSES = new Set(["queued", "crawling", "partial", "failed"]);
 
@@ -58,7 +57,7 @@ export default async function StoryLibraryDetailPage(props: {
   const data = await getStoryLibraryStoryAction(storyId);
   if (!data) notFound();
 
-  const { story, chapters, audioReadiness } = data;
+  const { story, chapters } = data;
   const resumeInfo = getResumeEligibility(story, chapters);
 
   const runScan = pickValue(searchParams.audio_scan) === "1";
@@ -140,8 +139,6 @@ export default async function StoryLibraryDetailPage(props: {
           </dl>
           <p className="mt-3 text-xs text-slate-500">{resumeInfo.reason}</p>
         </div>
-
-        <AudioReadinessCard storyId={story.id} readiness={audioReadiness} />
 
         <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
           <h2 className="text-lg font-medium text-slate-100">Audio text review (crawled chapters only)</h2>
@@ -271,53 +268,6 @@ export default async function StoryLibraryDetailPage(props: {
         </div>
       </div>
     </AppShell>
-  );
-}
-
-function AudioReadinessCard(props: { storyId: string; readiness: AudioReadinessResult }) {
-  const { readiness } = props;
-
-  return (
-    <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-lg font-medium text-slate-100">Audio readiness</h2>
-        <span className="rounded-full bg-slate-800 px-2 py-1 text-xs text-slate-300">
-          {AUDIO_CANDIDATE_STATUS_LABELS[readiness.status]}
-        </span>
-      </div>
-      <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
-        <Row label="Contiguous from #1" value={String(readiness.contiguousDoneFromStart)} />
-        <Row
-          label="Estimated audio time"
-          value={`${readiness.estimatedAudioMinutes.toLocaleString("vi-VN", { maximumFractionDigits: 1 })} min`}
-        />
-        <Row label="Missing for audio" value={String(readiness.unresolvedMissingForAudioCount)} />
-        <Row label="Raw source gaps" value={String(readiness.rawMissingChapters)} />
-        <Row label="TTS-ready via manual audio text" value={String(readiness.audioTextRecoveredChapters)} />
-        <Row label="Needs audio approval" value={String(readiness.audioTextNeedsApprovalChapters)} />
-        <Row label="Audio text blocked" value={String(readiness.audioTextBlockedChapters)} />
-        <Row label="Failed chapters" value={String(readiness.failedChapters)} />
-        <Row label="Recovered chapters" value={String(readiness.recoveredChapters)} />
-        <Row label="Ready for ~1h episode" value={readiness.readyForOneHourEpisode ? "Yes" : "No"} />
-      </dl>
-      <p className="mt-3 text-xs text-slate-500">Next: {readiness.nextAction.label}</p>
-      {readiness.status === "blocked_by_missing_chapters" && (
-        <Link
-          href="/admin/story-library/missing-chapters"
-          className="mt-3 inline-block rounded-lg border border-rose-700/60 px-3 py-1.5 text-xs font-medium text-rose-300 hover:border-rose-500"
-        >
-          Recover missing chapters
-        </Link>
-      )}
-      {readiness.status === "ready_for_preview" && (
-        <Link
-          href={`/admin/story-library/audio-candidates/${props.storyId}/episode-preview`}
-          className="mt-3 inline-block rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-rose-500"
-        >
-          Build episode preview
-        </Link>
-      )}
-    </div>
   );
 }
 

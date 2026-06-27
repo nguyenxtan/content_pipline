@@ -12,22 +12,22 @@ export const PROMPT_VERSION_REGISTRY = {
   image: {
     key: "image",
     version: "image-prompts-v3",
-    source: "src/lib/pipeline/images.ts + src/lib/pipeline/long-images.ts",
+    source: "src/lib/pipeline/images.ts",
   },
   titleMetadata: {
     key: "titleMetadata",
     version: "metadata-builder-v1",
-    source: "src/lib/social/youtube-metadata.ts + src/lib/longform-engine.ts",
+    source: "src/lib/social/youtube-metadata.ts",
   },
   thumbnailIntent: {
     key: "thumbnailIntent",
     version: "thumbnail-intent-v1",
-    source: "src/lib/longform-engine.ts",
+    source: "deterministic_social_metadata_builder",
   },
   tts: {
     key: "tts",
     version: "tts-routing-v1",
-    source: "src/lib/pipeline/tts.ts + src/lib/pipeline/longform-narration.ts",
+    source: "src/lib/pipeline/tts.ts",
   },
   quote: {
     key: "quote",

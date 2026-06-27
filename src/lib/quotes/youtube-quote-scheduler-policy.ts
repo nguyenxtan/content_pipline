@@ -1,5 +1,4 @@
 import type { ChannelDestinationConfig, ChannelKey } from "@/lib/config/channel-configs";
-import { getWorkspaceById } from "@/lib/channel-workspace-registry";
 
 export type YoutubeQuoteSchedulerMode = "independent_youtube_quote_short";
 export type YoutubeQuoteSchedulerJobType = "quote_pipeline";
@@ -32,35 +31,12 @@ export type YoutubeQuoteLanePlan = {
   jobAction: "insert" | "update" | "no_op";
 };
 
-const tangSauWorkspace = getWorkspaceById("tang_sau_workspace");
-
-const TANG_SAU_YOUTUBE_QUOTE_POLICY: YoutubeQuoteSchedulerPolicy = {
-  channelKey: "tang_sau",
-  enabled: true,
-  primaryPlatform: "youtube",
-  facebookQuotePhotoEnabled: false,
-  formatType: "legacy_quote_short",
-  quoteStyle: "static_deep_quote",
-  kinetic: false,
-  mode: "independent_youtube_quote_short",
-  schedulerJobType: "quote_pipeline",
-  frequency: "hourly",
-  targetPerDay: 2,
-  targetUpcomingQueueRows: 2,
-  maxQueueInsertPerRun: 1,
-  slotMinute: 0,
-  windowStart: tangSauWorkspace?.schedulePlan.postingWindows[0]?.start ?? "07:00",
-  windowEnd: tangSauWorkspace?.schedulePlan.postingWindows[0]?.end ?? "22:00",
-  intervalMin: tangSauWorkspace?.schedulePlan.intervalMinutes ?? 60,
-  workspaceId: "tang_sau_workspace",
-  channelProfileId: "tang_sau_v1",
-  durationSec: 14,
-};
-
+// tang_sau is out of scope (see docs/SCOPE_REDUCTION_AUDIT_2026_06_26.md). The YouTube-first
+// quote_pipeline lane was tang_sau-only; it is now permanently disabled by always returning
+// null. quote_pipeline's caller in content-generator.ts already no-ops cleanly on null.
 export function getYoutubeQuoteSchedulerPolicy(
-  value: string | null | undefined,
+  _value: string | null | undefined,
 ): YoutubeQuoteSchedulerPolicy | null {
-  if (value === "tang_sau") return TANG_SAU_YOUTUBE_QUOTE_POLICY;
   return null;
 }
 

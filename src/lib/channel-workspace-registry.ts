@@ -140,49 +140,7 @@ const WORKSPACES: ChannelWorkspace[] = [
     },
     status: "active",
   },
-  {
-    workspaceId: "tang_sau_workspace",
-    displayName: "Tầng sâu",
-    description: "Kênh triết lý, sách, tâm lý và đời sống nội tâm hiện đại. Quote Shorts là format chính.",
-    promptProfileId: "tang_sau_v1",
-    channelKey: "tang_sau",
-    platformAccounts: [
-      { platform: "youtube", platformChannelId: "UCXZzVWOo8TSHk2dws4B70eQ", displayName: "Tầng Sâu" },
-    ],
-    topicFamilies: [
-      { familyId: "modern_loneliness", priority: "high",   enabled: true,
-        seedIdeas: ["Cô đơn giữa đám đông", "Không ai thực sự hiểu nhau"],
-        avoidTerms: ["vô thường", "vô ngã"],
-      },
-      { familyId: "identity_choice",   priority: "high",   enabled: true,
-        seedIdeas: ["Bản ngã và lựa chọn", "Sống theo kỳ vọng của người khác"],
-      },
-      { familyId: "inner_freedom",     priority: "high",   enabled: true,
-        seedIdeas: ["Tự do thật sự là gì", "Khi nào ta thôi cần được công nhận"],
-      },
-      { familyId: "books_philosophy",  priority: "medium", enabled: true,
-        seedIdeas: ["Một cuốn sách thay đổi cách nhìn", "Triết học trong đời thường"],
-      },
-      { familyId: "meaning_silence",   priority: "medium", enabled: true,
-        seedIdeas: ["Ý nghĩa của khoảng lặng", "Dừng lại đúng lúc"],
-      },
-    ],
-    defaultFormats: {
-      tts_short: false,
-      legacy_quote_short: true,
-      long_video: false,
-      facebook_quote_photo: false,
-    },
-    formatMix: { ttsShortWeight: 0, quoteShortWeight: 3, longWeight: 0 },
-    schedulePlan: {
-      timezone: "Asia/Ho_Chi_Minh",
-      postingWindows: [{ start: "07:00", end: "22:00" }],
-      intervalMinutes: 60,
-      maxDailyPosts: 16,
-      platforms: ["youtube"],
-    },
-    status: "active",
-  },
+  // tang_sau_workspace removed — tang_sau is out of scope (see docs/SCOPE_REDUCTION_AUDIT_2026_06_26.md)
 ];
 
 // ── Registry API ──────────────────────────────────────────────────────────
